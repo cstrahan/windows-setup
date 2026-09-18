@@ -87,6 +87,25 @@ Gotchas:
   `GitForWindows` checks for this first and names the processes. Don't kill the user's
   processes; ask them to close them. The Claude app's shells set `GIT_EDITOR=true`, so `git var
   GIT_EDITOR` isn't meaningful from here; use `git config --show-origin --get core.editor`.
+- **Resource warnings are lost.** `Write-Warning`/`Write-Verbose` from a DSC resource shows up
+  neither in winget's console output nor in its log. Anything the user must see has to be
+  printed by `configure.py` (e.g. a hardware profile's `note`).
+- **Precision touchpad settings** (`HKCU\...\PrecisionTouchPad`) can't be applied live on
+  Windows 10: restarting the touchpad collection, its parent I2C HID device, or Explorer all
+  failed; signing out and in worked. `SPI_GET/SETTOUCHPADPARAMETERS` exists only from
+  Windows 11 24H2 (error 87 here). Touchpad tests can flip the registry freely: on Windows 10
+  nothing changes until the next sign-in. Precision touchpads show up in `Get-PnpDevice` with
+  hardware ID `HID_DEVICE_UP:000D_U:0005`.
+  - `PrecisionTouchpad`'s Windows 10 registry mappings were checked by reading
+    Settings > Devices > Touchpad with UI Automation (`UIAutomationClient`: TogglePattern,
+    RangeValuePattern, SelectionPattern; `Start-Process ms-settings:devices-touchpad`), not guessed.
+    `CursorSpeed` is 2 × the Windows 10 slider, and `ScrollDirection = 0xFFFFFFFF` means "Down motion
+    scrolls down". The SPI path (Windows 11 24H2+) follows Microsoft's `TOUCHPAD_PARAMETERS_V1`
+    docs and hasn't been run on real hardware.
+  - Test it unelevated with throwaway configs under `logs/` and `winget configure test` (exit 0 =
+    in the desired state), and restore the original values afterwards.
+- **PowerShell hashtable member access can hit methods:** `$h.Clear` is `Hashtable.Clear()`, not
+  the `Clear` key. Use `$h['Key']` for keys that might collide with members.
 - **Probing winget's host without UAC:** write a throwaway config under `logs/` with a
   `PSDscResources/Script` unit whose `TestScript` writes diagnostics to a file and returns
   `$true`. Leave out `securityContext: elevated` and it runs unelevated with no UAC prompt, so

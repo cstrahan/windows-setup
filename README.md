@@ -29,9 +29,9 @@ Arguments to `bootstrap.cmd` pass through to `configure.py`:
 
 `configuration/windows.dsc.yaml` is a [WinGet Configuration](https://aka.ms/winget-configure)
 file. Most resources come from the PowerShell Gallery. Where those fall short, this repo has
-its own class-based resources in `dsc/WindowsSetupDsc` (`WindowsCapability`, `GitForWindows`, `GoLang`),
-so winget needs `--module-path` pointing at `dsc`. It must be an absolute path. To check for
-drift without changing anything, from the repo root:
+its own class-based resources in `dsc/WindowsSetupDsc` (`WindowsCapability`, `GitForWindows`,
+`GoLang`, `PrecisionTouchpad`), so winget needs `--module-path` pointing at `dsc`. It must be
+an absolute path. To check for drift without changing anything, from the repo root:
 
 ```bat
 winget configure test --file configuration\windows.dsc.yaml --module-path %CD%\dsc
@@ -48,6 +48,29 @@ Currently configured:
 - Go, latest stable release (at least 1.27.1), from go.dev's official MSI (checksum-verified).
 - Git for Windows, latest version, with pinned installer choices: Explorer integration, editor,
   Windows OpenSSH, line endings, etc. Changing a choice re-runs the installer.
+
+### Hardware profiles
+
+`configuration/hardware.toml` lists extra configurations that apply only to matching
+hardware. Profiles match on the machine's vendor, model and version, and optionally on a
+present device's hardware ID. After `windows.dsc.yaml`, `configure.py` applies every profile
+that matches, and logs the ones it skips. Currently:
+
+- **System76 Gazelle (gaze16) with the ELAN0412 touchpad**: turns off touchpad tapping
+  (tap to click, two-finger tap to right-click, tap-and-drag), since the touchpad has
+  dedicated buttons.
+
+`PrecisionTouchpad` covers every user setting in Windows' touchpad API
+(`TOUCHPAD_PARAMETERS`): taps, the right-click zone, two-finger scroll and zoom, scrolling
+direction, sensitivity, cursor speed, and on newer hardware haptics. See the property comments
+in `dsc/WindowsSetupDsc/WindowsSetupDsc.psm1`.
+
+**Touchpad settings on Windows 10 take effect at the next sign-in.** Windows 11 24H2 added an
+API for applying them immediately (`SPI_SETTOUCHPADPARAMETERS`), and `PrecisionTouchpad` uses
+it where available. Windows 10 has no equivalent: restarting the touchpad device or Explorer
+doesn't apply them. Sign out and back in instead. Windows 10 also only supports the settings
+its Settings app has. The haptics settings, click force, right-click zone size and
+`HonorMouseAccelSetting` fail there with an error saying they need Windows 11 24H2.
 
 ## Troubleshooting
 

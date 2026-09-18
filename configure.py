@@ -13,17 +13,22 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import fnmatch
+import json
 import os
 import re
 import shlex
 import subprocess
 import sys
 import time
+import tomllib
 import winreg
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 WINGET_CONFIG = ROOT / "configuration" / "windows.dsc.yaml"
+# Extra winget configurations applied only on matching hardware.
+HARDWARE_PROFILES = ROOT / "configuration" / "hardware.toml"
 # Our own DSC modules (e.g. WindowsSetupDsc). Passed as winget's --module-path, so modules
 # winget downloads from the PowerShell Gallery also land here (they're git-ignored).
 DSC_MODULES = ROOT / "dsc"
@@ -138,12 +143,57 @@ def ensure_winget_current() -> None:
     log(f"winget {version}")
 
 
-def ensure_winget_configuration(config: Path) -> None:
-    ensure_winget_current()
+def apply_winget_configuration(config: Path) -> None:
     log(f"Applying winget configuration {config.relative_to(ROOT)}")
     # PSModulePath isn't inherited by winget's elevated configuration server; --module-path is.
     run(["winget", "configure", "--file", str(config), "--module-path", str(DSC_MODULES),
          "--accept-configuration-agreements", "--disable-interactivity"])
+
+
+# --- hardware profiles -----------------------------------------------------------------
+
+# Machine identity (Win32_ComputerSystemProduct) and the hardware IDs of present devices.
+HARDWARE_QUERY = """\
+$product = Get-CimInstance Win32_ComputerSystemProduct
+[pscustomobject]@{
+    vendor  = $product.Vendor
+    model   = $product.Name
+    version = $product.Version
+    devices = @(Get-PnpDevice -PresentOnly | ForEach-Object { $_.HardwareID } | Where-Object { $_ })
+} | ConvertTo-Json -Compress
+"""
+
+
+def detect_hardware() -> dict:
+    out = run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", HARDWARE_QUERY], capture=True)
+    return json.loads(decode(out.stdout))
+
+
+def profile_matches(profile: dict, hardware: dict) -> bool:
+    """All criteria the profile gives must match; values are case-insensitive globs."""
+    def glob(value: str | None, pattern: str) -> bool:
+        return fnmatch.fnmatchcase((value or "").lower(), pattern.lower())
+
+    for key in ("vendor", "model", "version"):
+        if key in profile and not glob(hardware[key], profile[key]):
+            return False
+    if "device" in profile and not any(glob(d, profile["device"]) for d in hardware["devices"]):
+        return False
+    return True
+
+
+def ensure_hardware_configuration() -> None:
+    profiles = tomllib.loads(HARDWARE_PROFILES.read_text(encoding="utf-8")).get("profile", [])
+    hardware = detect_hardware()
+    log(f"Hardware: {hardware['vendor']} {hardware['model']} ({hardware['version']})")
+    for profile in profiles:
+        if profile_matches(profile, hardware):
+            log(f"Hardware profile matches: {profile['name']}")
+            apply_winget_configuration(HARDWARE_PROFILES.parent / profile["config"])
+            if "note" in profile:
+                log(f"Note: {profile['note']}")
+        else:
+            log(f"Hardware profile doesn't match, skipping: {profile['name']}")
 
 
 # --- WSL -------------------------------------------------------------------------------
@@ -271,7 +321,9 @@ def main() -> int:
 
     try:
         if not args.skip_winget:
-            ensure_winget_configuration(WINGET_CONFIG)
+            ensure_winget_current()
+            apply_winget_configuration(WINGET_CONFIG)
+            ensure_hardware_configuration()
         if not args.skip_wsl:
             ensure_wsl(args.distro)
             ensure_wsl_ansible(args.distro)

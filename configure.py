@@ -40,7 +40,8 @@ MIN_WINGET = (1, 6)  # `winget configure` went GA in 1.6
 WINGET_UPDATE_NOT_APPLICABLE = 0x8A15002B  # `winget upgrade`: already the latest version
 WSL_FEATURES = ("Microsoft-Windows-Subsystem-Linux", "VirtualMachinePlatform")
 EXIT_REBOOT_REQUIRED = 3010  # same meaning as msiexec/dism's ERROR_SUCCESS_REBOOT_REQUIRED
-CBS_REBOOT_PENDING_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+SCANCODE_MAP_KEY = r"SYSTEM\CurrentControlSet\Control\Keyboard Layout"
+CBS_REBOOT_PENDING_KEY =r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
 WSL_PROBE_TIMEOUT = 60  # seconds; a healthy `wsl --status` returns in well under this
 WSL_RESET_TIMEOUT = 120
 
@@ -148,6 +149,15 @@ def apply_winget_configuration(config: Path) -> None:
     # PSModulePath isn't inherited by winget's elevated configuration server; --module-path is.
     run(["winget", "configure", "--file", str(config), "--module-path", str(DSC_MODULES),
          "--accept-configuration-agreements", "--disable-interactivity"])
+
+
+def read_scancode_map() -> bytes | None:
+    """Windows' keyboard remapping, which only takes effect after a restart."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, SCANCODE_MAP_KEY) as key:
+            return winreg.QueryValueEx(key, "Scancode Map")[0]
+    except FileNotFoundError:
+        return None
 
 
 # --- hardware profiles -----------------------------------------------------------------
@@ -322,7 +332,10 @@ def main() -> int:
     try:
         if not args.skip_winget:
             ensure_winget_current()
+            scancode_map = read_scancode_map()
             apply_winget_configuration(WINGET_CONFIG)
+            if read_scancode_map() != scancode_map:
+                log("Note: the keyboard remapping (Scancode Map) changed; it takes effect after a restart.")
             ensure_hardware_configuration()
         if not args.skip_wsl:
             ensure_wsl(args.distro)

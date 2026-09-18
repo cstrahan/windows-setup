@@ -104,6 +104,12 @@ Gotchas:
     docs and hasn't been run on real hardware.
   - Test it unelevated with throwaway configs under `logs/` and `winget configure test` (exit 0 =
     in the desired state), and restore the original values afterwards.
+- **Keyboard:** `Scancode Map` (HKLM) is global to all keyboards and read at boot (Microsoft
+  documents both; per-keyboard remapping needs a third-party filter driver). `configure.py`
+  prints a restart note when it changes. For repeat settings, the live values
+  (`SPI_GETKEYBOARDDELAY`/`SPEED`) and `HKCU\Control Panel\Keyboard` can disagree: in 2026-09 the
+  live delay here was 0 while the registry said 1, so `KeyboardRepeat` checks both and sets them
+  through `SystemParametersInfo` with `SPIF_UPDATEINIFILE`.
 - **PowerShell hashtable member access can hit methods:** `$h.Clear` is `Hashtable.Clear()`, not
   the `Clear` key. Use `$h['Key']` for keys that might collide with members.
 - **Probing winget's host without UAC:** write a throwaway config under `logs/` with a

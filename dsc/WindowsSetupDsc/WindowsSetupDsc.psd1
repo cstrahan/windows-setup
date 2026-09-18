@@ -12,5 +12,5 @@
     CmdletsToExport      = @()
     VariablesToExport    = @()
     AliasesToExport      = @()
-    DscResourcesToExport = @('WindowsCapability', 'GitForWindows', 'GoLang', 'PrecisionTouchpad')
+    DscResourcesToExport = @('WindowsCapability', 'GitForWindows', 'GoLang', 'PrecisionTouchpad', 'KeyboardRepeat')
 }

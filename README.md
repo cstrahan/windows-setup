@@ -30,7 +30,7 @@ Arguments to `bootstrap.cmd` pass through to `configure.py`:
 `configuration/windows.dsc.yaml` is a [WinGet Configuration](https://aka.ms/winget-configure)
 file. Most resources come from the PowerShell Gallery. Where those fall short, this repo has
 its own class-based resources in `dsc/WindowsSetupDsc` (`WindowsCapability`, `GitForWindows`,
-`GoLang`, `PrecisionTouchpad`), so winget needs `--module-path` pointing at `dsc`. It must be
+`GoLang`, `PrecisionTouchpad`, `KeyboardRepeat`), so winget needs `--module-path` pointing at `dsc`. It must be
 an absolute path. To check for drift without changing anything, from the repo root:
 
 ```bat
@@ -44,6 +44,9 @@ Currently configured:
 - `RealTimeIsUniversal = 1`: the hardware clock is kept in UTC. Takes effect after a reboot.
 - Explorer Folder Options (current user): show hidden files, show file extensions, show
   empty drives, full path in the title bar. Restart Explorer or sign out to see them.
+- Keyboard repeat (current user): shortest repeat delay, fastest repeat rate. Applied immediately.
+- Caps Lock acts as an extra Left Ctrl, on every keyboard. It takes effect after a restart:
+  Windows' remapping (`Scancode Map`) applies to all keyboards and is read at boot.
 - Visual Studio Code and Windows Terminal installed.
 - Go, latest stable release (at least 1.27.1), from go.dev's official MSI (checksum-verified).
 - Git for Windows, latest version, with pinned installer choices: Explorer integration, editor,

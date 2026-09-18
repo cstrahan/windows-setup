@@ -105,6 +105,34 @@ properties:
         Ensure: Present
         Force: true
 
+    # Keyboard repeat (Control Panel > Keyboard): applied immediately and saved.
+    - resource: WindowsSetupDsc/KeyboardRepeat
+      id: keyboardRepeat
+      directives:
+        description: 'Keyboard: shortest repeat delay, fastest repeat rate'
+        allowPrerelease: false
+      settings:
+        IsSingleInstance: "Yes"  # quoted: YAML would otherwise read it as a boolean
+        RepeatDelay: 0  # default 1
+        RepeatRate: 31  # the default, and the fastest
+
+    # Caps Lock acts as an extra Left Ctrl, on every keyboard. Windows' Scancode Map can't be
+    # per-keyboard, and takes effect after a restart. Format: 8-byte header, entry count 2 (one
+    # mapping + terminator), 1D00 3A00 = Left Ctrl (0x1D) replacing Caps Lock (0x3A), terminator.
+    - resource: PSDscResources/Registry
+      id: capsLockAsCtrl
+      directives:
+        description: 'Keyboard: Caps Lock acts as Left Ctrl (after a restart)'
+        securityContext: elevated
+        allowPrerelease: false
+      settings:
+        Key: HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Keyboard Layout
+        ValueName: Scancode Map
+        ValueType: Binary
+        ValueData: "0000000000000000020000001d003a0000000000"
+        Ensure: Present
+        Force: true
+
     # VS Code updates itself, so only its presence is managed.
     - resource: Microsoft.WinGet.DSC/WinGetPackage
       id: vscode

@@ -12,5 +12,5 @@
     CmdletsToExport      = @()
     VariablesToExport    = @()
     AliasesToExport      = @()
-    DscResourcesToExport = @('WindowsCapability', 'GitForWindows')
+    DscResourcesToExport = @('WindowsCapability', 'GitForWindows', 'GoLang')
 }

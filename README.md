@@ -29,7 +29,7 @@ Arguments to `bootstrap.cmd` pass through to `configure.py`:
 
 `configuration/windows.dsc.yaml` is a [WinGet Configuration](https://aka.ms/winget-configure)
 file. Most resources come from the PowerShell Gallery. Where those fall short, this repo has
-its own class-based resources in `dsc/WindowsSetupDsc` (`WindowsCapability`, `GitForWindows`),
+its own class-based resources in `dsc/WindowsSetupDsc` (`WindowsCapability`, `GitForWindows`, `GoLang`),
 so winget needs `--module-path` pointing at `dsc`. It must be an absolute path. To check for
 drift without changing anything, from the repo root:
 
@@ -45,6 +45,7 @@ Currently configured:
 - Explorer Folder Options (current user): show hidden files, show file extensions, show
   empty drives, full path in the title bar. Restart Explorer or sign out to see them.
 - Visual Studio Code and Windows Terminal installed.
+- Go, latest stable release (at least 1.27.1), from go.dev's official MSI (checksum-verified).
 - Git for Windows, latest version, with pinned installer choices: Explorer integration, editor,
   Windows OpenSSH, line endings, etc. Changing a choice re-runs the installer.
 

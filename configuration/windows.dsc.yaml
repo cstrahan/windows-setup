@@ -124,6 +124,18 @@ properties:
         Id: Microsoft.WindowsTerminal
         Source: winget
 
+    # From go.dev rather than winget's GoLang.Go, which can trail upstream releases by days.
+    - resource: WindowsSetupDsc/GoLang
+      id: go
+      directives:
+        description: Install the latest stable Go from go.dev
+        securityContext: elevated
+        allowPrerelease: false
+      settings:
+        IsSingleInstance: "Yes"  # quoted: YAML would otherwise read it as a boolean
+        UseLatest: true
+        MinimumVersion: 1.27.1
+
     # The installer only offers some choices when their targets exist: EditorOption needs VS Code,
     # the windowsterminal component needs Windows Terminal, and ExternalOpenSSH makes Git use
     # Windows' OpenSSH (and so the ssh-agent service) instead of its bundled copy.

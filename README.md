@@ -42,6 +42,8 @@ Currently configured:
 - OpenSSH Client capability installed.
 - `ssh-agent` service: startup type Automatic, and running.
 - `RealTimeIsUniversal = 1`: the hardware clock is kept in UTC. Takes effect after a reboot.
+- Explorer Folder Options (current user): show hidden files, show file extensions, show
+  empty drives, full path in the title bar. Restart Explorer or sign out to see them.
 - Visual Studio Code and Windows Terminal installed.
 - Git for Windows, latest version, with pinned installer choices: Explorer integration, editor,
   Windows OpenSSH, line endings, etc. Changing a choice re-runs the installer.

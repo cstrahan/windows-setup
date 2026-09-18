@@ -51,6 +51,60 @@ properties:
         Ensure: Present
         Force: true
 
+    # Explorer > Folder Options, per user (HKCU): only settings that differ from the Windows 10
+    # defaults. Explorer picks them up in new windows after restarting it (or signing out).
+    - resource: PSDscResources/Registry
+      id: explorerShowHiddenFiles
+      directives:
+        description: 'Folder Options: Show hidden files, folders, and drives'
+        allowPrerelease: false
+      settings:
+        Key: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+        ValueName: Hidden
+        ValueType: DWord
+        ValueData: "1"  # default 2: don't show
+        Ensure: Present
+        Force: true
+
+    - resource: PSDscResources/Registry
+      id: explorerShowFileExtensions
+      directives:
+        description: 'Folder Options: uncheck "Hide extensions for known file types"'
+        allowPrerelease: false
+      settings:
+        Key: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+        ValueName: HideFileExt
+        ValueType: DWord
+        ValueData: "0"  # default 1
+        Ensure: Present
+        Force: true
+
+    - resource: PSDscResources/Registry
+      id: explorerShowEmptyDrives
+      directives:
+        description: 'Folder Options: uncheck "Hide empty drives"'
+        allowPrerelease: false
+      settings:
+        Key: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+        ValueName: HideDrivesWithNoMedia
+        ValueType: DWord
+        ValueData: "0"  # default 1
+        Ensure: Present
+        Force: true
+
+    - resource: PSDscResources/Registry
+      id: explorerFullPathInTitleBar
+      directives:
+        description: 'Folder Options: check "Display the full path in the title bar"'
+        allowPrerelease: false
+      settings:
+        Key: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState
+        ValueName: FullPath
+        ValueType: DWord
+        ValueData: "1"  # default 0
+        Ensure: Present
+        Force: true
+
     # VS Code updates itself, so only its presence is managed.
     - resource: Microsoft.WinGet.DSC/WinGetPackage
       id: vscode

@@ -1,0 +1,107 @@
+# yaml-language-server: $schema=https://aka.ms/configuration-dsc-schema/0.2
+#
+# Declarative Windows configuration, applied with:
+#   winget configure --file configuration\windows.dsc.yaml --module-path %CD%\dsc
+#   (--module-path must be absolute; run from the repo root.)
+# `winget configure test ...` (same arguments) reports drift without changing anything.
+properties:
+  configurationVersion: 0.2.0
+  resources:
+    # Ships with Windows 10 1809+, but it's an optional capability that can be missing.
+    # WindowsSetupDsc is this repo's own module (dsc/), not ComputerManagementDsc: the DISM
+    # cmdlets fail natively inside winget's PowerShell 7 host on Windows 10.
+    - resource: WindowsSetupDsc/WindowsCapability
+      id: openSshClient
+      directives:
+        description: Install the OpenSSH client (ssh, ssh-agent, ssh-add)
+        securityContext: elevated
+        allowPrerelease: false
+      settings:
+        Name: OpenSSH.Client~~~~0.0.1.0
+        Ensure: Present
+
+    # The OpenSSH agent is disabled by default.
+    - resource: PSDscResources/Service
+      id: sshAgent
+      dependsOn:
+        - openSshClient
+      directives:
+        description: Start the OpenSSH agent automatically, and now
+        securityContext: elevated
+        allowPrerelease: false
+      settings:
+        Name: ssh-agent
+        StartupType: Automatic
+        State: Running
+        Ensure: Present
+
+    # Keep the hardware clock (RTC) in UTC, like Linux does, so dual-booting doesn't skew the clock.
+    # Windows reads this at boot, so it takes effect after a reboot.
+    - resource: PSDscResources/Registry
+      id: rtcIsUniversal
+      directives:
+        description: Treat the hardware clock (RTC) as UTC
+        securityContext: elevated
+        allowPrerelease: false
+      settings:
+        Key: HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\TimeZoneInformation
+        ValueName: RealTimeIsUniversal
+        ValueType: QWord
+        ValueData: "1"
+        Ensure: Present
+        Force: true
+
+    # VS Code updates itself, so only its presence is managed.
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: vscode
+      directives:
+        description: Install Visual Studio Code
+        allowPrerelease: false
+      settings:
+        Id: Microsoft.VisualStudioCode
+        Source: winget
+
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: windowsTerminal
+      directives:
+        description: Install Windows Terminal
+        allowPrerelease: false
+      settings:
+        Id: Microsoft.WindowsTerminal
+        Source: winget
+
+    # The installer only offers some choices when their targets exist: EditorOption needs VS Code,
+    # the windowsterminal component needs Windows Terminal, and ExternalOpenSSH makes Git use
+    # Windows' OpenSSH (and so the ssh-agent service) instead of its bundled copy.
+    - resource: WindowsSetupDsc/GitForWindows
+      id: git
+      dependsOn:
+        - vscode
+        - windowsTerminal
+        - openSshClient
+      directives:
+        description: Install Git for Windows with these installer choices
+        securityContext: elevated
+        allowPrerelease: false
+      settings:
+        Id: Git.Git
+        UseLatest: true
+        Components:
+          - ext\shellhere      # Explorer: "Open Git Bash here"
+          - ext\guihere        # Explorer: "Open Git GUI here"
+          - gitlfs
+          - assoc              # .gitconfig, .gitattributes, ... open in the editor
+          - assoc_sh           # .sh files run with Bash
+          - windowsterminal    # Git Bash profile in Windows Terminal
+        EditorOption: VisualStudioCode
+        DefaultBranchOption: main
+        PathOption: Cmd
+        SSHOption: ExternalOpenSSH
+        CURLOption: WinSSL
+        CRLFOption: CRLFAlways
+        BashTerminalOption: MinTTY
+        GitPullBehaviorOption: Merge
+        UseCredentialManager: Enabled
+        PerformanceTweaksFSCache: Enabled
+        EnableSymlinks: Enabled
+        EnableFSMonitor: Disabled

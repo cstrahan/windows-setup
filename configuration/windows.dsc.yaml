@@ -51,6 +51,53 @@ properties:
         Ensure: Present
         Force: true
 
+    # Windows only polls its time server every several hours (SpecialPollInterval) and doesn't
+    # resync on wake, so after sleep, hibernation or Fast Startup the clock can stay wrong for
+    # hours. Keep the time service running, and resync whenever the network connects or the
+    # machine resumes.
+    - resource: PSDscResources/Service
+      id: timeService
+      directives:
+        description: 'Time: keep the Windows Time service running'
+        securityContext: elevated
+        allowPrerelease: false
+      settings:
+        Name: W32Time
+        StartupType: Automatic  # non-domain Windows 10 defaults to a trigger start
+        State: Running
+        Ensure: Present
+
+    - resource: ComputerManagementDsc/ScheduledTask
+      id: timeResyncTask
+      dependsOn:
+        - timeService
+      directives:
+        description: 'Time: resync when the network connects or the machine resumes'
+        securityContext: elevated
+        allowPrerelease: false
+      settings:
+        TaskPath: \windows-setup\
+        TaskName: Resync time
+        Description: Resync the clock (w32tm /resync) when a network connects or the machine resumes from sleep. Managed by windows-setup.
+        ActionExecutable: '%SystemRoot%\System32\w32tm.exe'
+        ActionArguments: /resync
+        ScheduleType: OnEvent
+        # NetworkProfile 10000 = network connected; Power-Troubleshooter 1 = resumed from sleep.
+        EventSubscription: >-
+          <QueryList><Query Id="0" Path="Microsoft-Windows-NetworkProfile/Operational">
+          <Select Path="Microsoft-Windows-NetworkProfile/Operational">*[System[Provider[@Name='Microsoft-Windows-NetworkProfile'] and EventID=10000]]</Select>
+          <Select Path="System">*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]</Select>
+          </Query></QueryList>
+        Delay: '00:00:15'  # give DNS a moment after the network comes up
+        BuiltInAccount: SYSTEM
+        MultipleInstances: IgnoreNew
+        ExecutionTimeLimit: '00:05:00'
+        # Task Scheduler's defaults skip tasks on battery, which would defeat this on laptops.
+        AllowStartIfOnBatteries: true
+        DontStopIfGoingOnBatteries: true
+        Enable: true
+        Ensure: Present
+
     # Explorer > Folder Options, per user (HKCU): only settings that differ from the Windows 10
     # defaults. Explorer picks them up in new windows after restarting it (or signing out).
     - resource: PSDscResources/Registry

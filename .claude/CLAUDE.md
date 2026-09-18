@@ -110,6 +110,13 @@ Gotchas:
   (`SPI_GETKEYBOARDDELAY`/`SPEED`) and `HKCU\Control Panel\Keyboard` can disagree: in 2026-09 the
   live delay here was 0 while the registry said 1, so `KeyboardRepeat` checks both and sets them
   through `SystemParametersInfo` with `SPIF_UPDATEINIFILE`.
+- **Time sync:** on this laptop, after sleep/hibernation the first sync often came only at the
+  next poll (8+ hours later); the event log shows it (`Power-Troubleshooter` 1 = resume,
+  `Time-Service` 35/37 = sync). Hence the `\windows-setup\Resync time` task. Tasks running as
+  SYSTEM are invisible to unelevated queries (`Get-ScheduledTask` says not found, and
+  `winget configure test` reports drift), so inspect or test them elevated, e.g.
+  `schtasks /query /tn ... /xml`. Task Scheduler's defaults skip tasks on battery; set
+  `AllowStartIfOnBatteries`/`DontStopIfGoingOnBatteries` for anything a laptop needs.
 - **PowerShell hashtable member access can hit methods:** `$h.Clear` is `Hashtable.Clear()`, not
   the `Clear` key. Use `$h['Key']` for keys that might collide with members.
 - **Probing winget's host without UAC:** write a throwaway config under `logs/` with a

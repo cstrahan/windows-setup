@@ -42,6 +42,10 @@ Currently configured:
 - OpenSSH Client capability installed.
 - `ssh-agent` service: startup type Automatic, and running.
 - `RealTimeIsUniversal = 1`: the hardware clock is kept in UTC. Takes effect after a reboot.
+- Time sync: the Windows Time service stays running, and a scheduled task
+  (`\windows-setup\Resync time`) runs `w32tm /resync` whenever a network connects or the
+  machine resumes. Otherwise Windows waits for its next poll, which can be hours away, before
+  correcting the clock after sleep, hibernation or Fast Startup.
 - Explorer Folder Options (current user): show hidden files, show file extensions, show
   empty drives, full path in the title bar. Restart Explorer or sign out to see them.
 - Keyboard repeat (current user): shortest repeat delay, fastest repeat rate. Applied immediately.

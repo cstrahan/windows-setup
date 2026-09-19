@@ -113,7 +113,9 @@ Gotchas:
   pipeline early and leaves `$LASTEXITCODE` from the *previous* command, so capture all output
   first. `Get-ItemPropertyValue -ErrorAction SilentlyContinue` still *throws* when the key exists
   but the value doesn't; use `Get-RegistryValue` (bootstrap.ps1). In any PowerShell, `-replace 'a', 'b'` inside a method call's parentheses splits into
-  two method arguments; compute it into a variable first.
+  two method arguments; compute it into a variable first. Related: `,` binds tighter than
+  arithmetic, so `@(0x6F + $n, 0)` is `0x6F + ($n, 0)` and fails with "does not contain a method
+  named 'op_Addition'"; parenthesise the sum.
 - **PowerShell 7 must be the MSI.** winget's `Microsoft.PowerShell` defaults to the MSIX build
   (per-user, sandboxed, only a `WindowsApps\pwsh.exe` alias), so bootstrap passes
   `--installer-type wix --scope machine`.
@@ -347,9 +349,22 @@ $session = Start-ConsoleApp -Command '. "$HOME\.config\powershell\profile.d\40-f
 try {
     Wait-ConsoleText $session 'Files> '            # poll, don't sleep
     Send-ConsoleKeys $session 'psfzf'              # literal text
-    $screen = Send-ConsoleKeys $session 'ctrl-s'   # chord; returns the redrawn screen as string[]
+    $screen = Send-ConsoleKeys $session '^s'       # Ctrl+S; returns the redrawn screen as string[]
 } finally { Stop-ConsoleApp $session }             # always
 ```
+
+- **Keys use AutoHotkey v2's `Send` syntax** (`tools\ConsoleHarness\KeySpec.ps1`, parsed in the
+  calling process): text is literal, `{Enter}` `{Tab}` `{BS 3}` `{F5}` are keys, `^` `!` `+` are
+  Ctrl/Alt/Shift for the next key, `{Ctrl down}`…`{Ctrl up}` holds one, and `{^}` `{!}` `{{}`
+  `{U+263A}` `{Raw}` are the escapes. **`!` and `+` inside text need escaping**: `:qa!{Enter}`
+  silently sends Alt+Enter, so write `:qa{!}{Enter}`. **`Send-ConsoleText` is the literal
+  counterpart** (AHK's `SendText`): nothing in it is syntax, so paths, commas, braces and words
+  like `enter` all survive — use it for anything that came from a variable or the app's own
+  output. `#` (Win), mouse/media keys and a bare `{Ctrl}` are errors, since a console app can't
+  receive them.
+- **Tests:** `pwsh -File tools\ConsoleHarness\Test-ConsoleHarness.ps1` (add `-SkipConsole` for the
+  parser cases alone; the rest drive a real fzf, so fzf must be on PATH — it isn't in Claude's
+  shells, so prepend `$env:LOCALAPPDATA\mise\shims`).
 
 - **How:** the app runs in its own hidden console; each call spawns a worker that attaches to it
   (`AttachConsole`), reads the visible grid (`ReadConsoleOutputCharacter`) and injects keys
@@ -361,7 +376,7 @@ try {
   the focused window. Nothing suitable exists on the PowerShell Gallery (the only near-match,
   `Expect` 0.0.1, is pipe-based and can't drive a full-screen TUI).
 - **Verified 2026-09-19:** `fdg`'s files/directories toggle (prompt, list and preview all change),
-  typing to filter, and Neovim (file opens, `<leader>` shows which-key, `:qa!` exits).
+  typing to filter, and Neovim (file opens, `<leader>` shows which-key, `:qa{!}{Enter}` exits).
 - **Gotchas:**
   - Assert on lasting UI state, not messages: LazyVim's `noice` shows `:version` and friends in a
     popup that fades before the next read.

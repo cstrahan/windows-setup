@@ -5,7 +5,7 @@
     Author            = 'Charles Strahan'
     Description       = 'Drive and read an interactive console app (fzf, Neovim, prompts) for testing.'
     PowerShellVersion = '7.0'
-    FunctionsToExport = @('Start-ConsoleApp', 'Get-ConsoleScreen', 'Send-ConsoleKeys', 'Wait-ConsoleText', 'Stop-ConsoleApp')
+    FunctionsToExport = @('Start-ConsoleApp', 'Get-ConsoleScreen', 'Send-ConsoleKeys', 'Send-ConsoleText', 'Wait-ConsoleText', 'Stop-ConsoleApp')
     CmdletsToExport   = @()
     VariablesToExport = @()
     AliasesToExport   = @()

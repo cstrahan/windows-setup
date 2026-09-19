@@ -80,6 +80,15 @@ Gotchas:
   your shell were visible to winget's (unsandboxed) process. So things that write only to
   `~\...` and the registry, like Scoop's installer, can run from your shell, so the bootstrap's
   unelevated section can be tested from here.
+- **Starting WSL from your (sandboxed) shells leaves broken WSLg clients behind.** Each distro
+  start spawns WSLg's `msrdc.exe` (a Remote Desktop client). Started from the Claude app's
+  sandbox, including elevated children, those clients showed recurring "Could not load the Remote
+  Desktop Services ActiveX control (rdclientax.dll)" and "RemoteApp … unable to connect" pop-ups
+  for the user (2026-09-18: six of them, one per WSL-touching test run). Started outside the
+  sandbox (via winget's process), the client lingered silently, which is normal. So use `-SkipWsl`
+  for routine runs. If WSL must be exercised, note the time first, and afterwards stop the
+  `msrdc.exe` processes started since then, elevated (`taskkill /F /PID ...`; wslservice launches
+  them, so unelevated gets Access denied). Tell the user.
 - **Redirected runs aren't interactive.** The distro install (`wsl --install -d ...`) prompts for
   a Linux username/password, so that step has to be run by the user in a real terminal.
 - **Windows PowerShell 5.1 gotchas** (bootstrap.ps1): `& exe | Select-Object -First 1` stops the

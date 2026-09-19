@@ -256,7 +256,15 @@ function Write-DscReport($Report) {
 # the console; its JSON result (stdout) becomes the summary.
 function Invoke-DscConfiguration([string] $Path) {
     Write-Step "Applying $([System.IO.Path]::GetRelativePath($Root, $Path))"
-    $result = Invoke-Native dsc.exe @('config', 'set', '--file', $Path, '--output-format', 'json') -CaptureStdout -AllowFailure
+    $arguments = @('config')
+    # Configurations that install files from the repo take its path as a parameter. dsc rejects
+    # parameters a configuration doesn't declare ("No parameters defined in configuration"), so
+    # only pass it to those that do.
+    if ((Get-Content -Raw -LiteralPath $Path) -match '(?m)^\s+repoRoot:') {
+        $arguments += @('--parameters', (@{ parameters = @{ repoRoot = $Root } } | ConvertTo-Json -Compress))
+    }
+    $arguments += @('set', '--file', $Path, '--output-format', 'json')
+    $result = Invoke-Native dsc.exe $arguments -CaptureStdout -AllowFailure
     $report = $null
     if ($result.Output.Trim()) {
         try { $report = $result.Output | ConvertFrom-Json } catch { Write-Host $result.Output }

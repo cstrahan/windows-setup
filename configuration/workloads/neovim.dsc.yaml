@@ -21,29 +21,10 @@ resources:
   # fzf, ripgrep and fd for fzf-lua; lazygit; tree-sitter (the CLI) for nvim-treesitter; ast-grep
   # for grug-far's structural search.
   - name: miseTools
-    type: Microsoft.DSC.Transitional/PowerShellScript
+    type: WindowsSetup.MiseTools/MiseTools
     properties:
-      input: [fzf, ripgrep, fd, lazygit, tree-sitter, ast-grep]
-      getScript: |
-        param($Tools)
-        return
-      testScript: |
-        param($Tools)
-        $env:Path = ([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User') | Where-Object { $_ }) -join ';'
-        if (-not (Get-Command mise -ErrorAction SilentlyContinue)) { return $false }
-        $global = mise ls --global --json 2>$null | ConvertFrom-Json -AsHashtable
-        -not @($Tools | Where-Object { -not $global -or -not $global.ContainsKey($_) -or -not @($global[$_] | Where-Object { $_['installed'] }) })
-      setScript: |
-        param($Tools)
-        $env:Path = ([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User') | Where-Object { $_ }) -join ';'
-        if (-not (Get-Command mise -ErrorAction SilentlyContinue)) { throw 'mise is not on PATH (bootstrap.ps1 installs it with Scoop)' }
-        $global = mise ls --global --json 2>$null | ConvertFrom-Json -AsHashtable
-        $missing = @($Tools | Where-Object { -not $global -or -not $global.ContainsKey($_) -or -not @($global[$_] | Where-Object { $_['installed'] }) })
-        foreach ($tool in $missing) {
-            $output = & mise use --global "$tool@latest" 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "mise use --global $tool@latest failed ($LASTEXITCODE): $(($output | Select-Object -Last 5) -join ' ')" }
-            "installed $tool with mise"
-        }
+      Name: neovim
+      Tools: [fzf, ripgrep, fd, lazygit, tree-sitter, ast-grep]
 
   # mise's shims (real .exe files, windows_shim_mode = exe) on the user PATH, so its tools work
   # where mise isn't activated, e.g. Neovim started outside PowerShell. Activated shells put the
@@ -51,7 +32,7 @@ resources:
   - name: miseShimsOnPath
     type: Microsoft.DSC.Transitional/PowerShellScript
     dependsOn:
-      - "[resourceId('Microsoft.DSC.Transitional/PowerShellScript', 'miseTools')]"
+      - "[resourceId('WindowsSetup.MiseTools/MiseTools', 'miseTools')]"
     properties:
       getScript: 'return'
       testScript: |

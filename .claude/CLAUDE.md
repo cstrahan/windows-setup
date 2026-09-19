@@ -310,6 +310,25 @@ Gotchas:
   `Microsoft.DSC.Transitional/PowerShellScript` resource whose scripts write diagnostics, and run
   `dsc config set --file logs\x.dsc.yaml --output-format json` directly from your shell.
 - **`wsl.exe` output** is UTF-16LE unless `WSL_UTF8=1` is set; `configure.ps1` handles both.
+- **dsc config parameters:** `--parameters '<json>'` is an option of `dsc config` itself, *before*
+  the subcommand (`dsc config --parameters ... set --file ...`), and dsc fails with "No parameters
+  defined in configuration" when the document doesn't declare them. `Invoke-DscConfiguration`
+  therefore passes `repoRoot` only to configurations whose text matches `^\s+repoRoot:` (the
+  `shell` workload installs files from the repo that way).
+- **A property string starting with `[` is parsed as a dsc expression** (`[parameters('x')]`), even
+  in a `|` block scalar: a `testScript` beginning with `[bool] (...)` fails with "Parser: Unable to
+  parse statement root". Start such scripts with something else (assign first, then `[bool] $x`).
+- **PowerShell profiles** (the `shell` workload): the loader block goes in the all-hosts profiles
+  (`Documents\{PowerShell,WindowsPowerShell}\profile.ps1`) and dot-sources
+  `~\.config\powershell\profile.d\*.ps1`; the snippets are copied from
+  `configuration\powershell\profile.d` and carry a `windows-setup: managed file` header (that
+  marker is what makes removal of dropped files safe). Profiles and `~\.config` are outside the
+  AppData sandbox, so this workload can be applied and tested straight from your shell with
+  `dsc config --parameters ... set --file configuration\workloads\shell.dsc.yaml` (no UAC: mise
+  installs, `Install-PSResource -Scope CurrentUser` and those files are all per-user). Test the
+  result with `pwsh -NoProfile -Command { Import-Module PSReadLine; . <snippet>; Get-PSReadLineKeyHandler -Bound }`:
+  a non-interactive host has no PSReadLine loaded, and `20-psfzf.ps1` deliberately returns early
+  there (as it does on 5.1, whose PSReadLine 2.0 is older than PSFzf's handlers expect).
 - **Running things outside the AppData sandbox, unelevated:** `logs\unsandboxed.dsc.yaml` (git-
   ignored; recreate if missing) is a PowerShellScript resource whose setScript refreshes PATH and
   runs `logs\step.ps1` with all output to `logs\step.log`. `dsc config set --file
@@ -331,8 +350,9 @@ The earlier `nvim-data` (only shada/swap from Neovim 0.10) is at `nvim-data.bak`
   (`~\.config\mise\config.toml`, alongside the user's `node`). mise's `windows_shim_mode` is `exe`
   (real executables, which plugins can spawn directly, unlike `.cmd` shims), and the workload puts
   `%LOCALAPPDATA%\mise\shims` on the user PATH, since `mise activate` only happens in PowerShell 7
-  profiles. The Windows PowerShell 5.1 profile now activates mise only on 7+ (on 5.1 it printed
-  "chpwd functionality requires PowerShell version 7" on every start; snacks' health showed it).
+  profiles. mise activation now lives in the `shell` workload's
+  `profile.d\00-mise.ps1` (PowerShell 7 only: on 5.1 `mise activate` printed "chpwd functionality
+  requires PowerShell version 7" on every start, which snacks' health surfaced; 5.1 uses the shims).
 - **Install steps** (through the unsandboxed runner above):
   1. Move `nvim` / `nvim-data` aside, `git clone https://github.com/LazyVim/starter
      %LOCALAPPDATA%\nvim`, delete its `.git`.
@@ -356,8 +376,9 @@ The earlier `nvim-data` (only shada/swap from Neovim 0.10) is at `nvim-data.bak`
   installing parsers. Workarounds tested: `CC=<path to cl.exe>` **breaks** the build (bypasses
   the crate's environment setup: `stdio.h` not found); MSVC's bin dir on PATH works but also puts
   `link`, `lib`, `nmake`, ... on PATH. Chosen: WinLibs gcc (winget, LazyVim's own suggestion);
-  with gcc on PATH LazyVim sets `CC=gcc`. An upstream LazyVim fix (find cl.exe via vswhere) was
-  proposed to the user; as of 2026-09-19 no LazyVim issue/PR covered it.
+  with gcc on PATH LazyVim sets `CC=gcc`. Upstream fix (find cl.exe via vswhere): LazyVim PR #7257,
+  https://github.com/LazyVim/LazyVim/pull/7257 (opened 2026-09-19). If merged, gcc is no longer needed
+  for LazyVim on machines with Visual Studio.
 - **Providers** (`vim.provider` health is all green): the `neovim` workload installs each, and
   `%LOCALAPPDATA%\nvim\lua\config\options.lua` (edited by hand) pins them on Windows:
   `g:python3_host_prog` = `stdpath('data')/python-provider/Scripts/python.exe` (a `uv venv` with
@@ -384,7 +405,12 @@ The earlier `nvim-data` (only shada/swap from Neovim 0.10) is at `nvim-data.bak`
     built and loaded. Without `--scope system` it writes the per-user `%APPDATA%\luarocks` config.
   - lazy's health still reports "`.../hererocks/bin/luarocks` not installed": a lazy.nvim bug on
     Windows. Its install path appends `.bat` (`lua/lazy/pkg/rockspec.lua`, ~line 155) but its
-    health check doesn't (~line 80). Harmless.
+    health check doesn't (~line 80). Harmless. Upstream fix: lazy.nvim PR #2185,
+    https://github.com/folke/lazy.nvim/pull/2185 (opened 2026-09-19).
+- **Upstream work** happens in clones under `~\src\upstream` (LazyVim, lazy.nvim), with `origin` =
+  upstream and `fork` = the user's fork; `gh` (mise global config, signed in by the user with
+  SSH) opened the PRs. Clones use `core.autocrlf=true`, so check formatting on an LF copy of
+  the file (`stylua --check`; Mason's stylua), not the CRLF working file.
 - **Remaining health warnings, judged harmless:** Mason's missing unzip/wget/gzip/7z/php/julia
   (it unpacked lua-language-server fine with Windows' own tools); lazy's luarocks error (see
   hererocks above); `site\pack\core` existing packages / vim.pack lockfile (an empty

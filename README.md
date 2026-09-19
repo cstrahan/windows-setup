@@ -73,7 +73,7 @@ The configurations are [DSC v3](https://learn.microsoft.com/powershell/dsc/overv
 Most resources are DSC's and winget's built-in ones (`Microsoft.Windows/Registry`,
 `Microsoft.Windows/Service`, `Microsoft.WinGet/Package`, `Microsoft.DSC.Transitional/PowerShellScript`).
 Where those fall short, this repo has its own class-based PowerShell resources in `dsc/`, one
-module each: `WindowsSetup.WindowsCapability`, `.ScheduledTask`, `.DriverPackage`, `.DriverInstaller`, `.NvidiaDriver`, `.GitForWindows`, `.GoLang`,
+module each: `WindowsSetup.WindowsCapability`, `.ScheduledTask`, `.MiseTools`, `.DriverPackage`, `.DriverInstaller`, `.NvidiaDriver`, `.GitForWindows`, `.GoLang`,
 `.KeyboardRepeat`, `.PrecisionTouchpad`, `.VisualStudioComponents` (plus `WindowsSetup.Common`,
 shared code). DSC finds them through `PSModulePath`, which `configure.ps1` sets. To check a
 configuration for drift without changing anything, in an elevated PowerShell 7 at the repo root:
@@ -118,6 +118,7 @@ Settings marked Windows 11 are harmless on Windows 10: they're just registry val
 | `git` | Git for Windows, latest version, with pinned installer choices: Explorer integration, VS Code as editor, Windows OpenSSH, line endings, a Terminal profile, etc. Changing a choice re-runs the installer. Requires `ssh`, `vscode`, `terminal`. |
 | `go` | Go, latest stable release (at least 1.27.1), from go.dev's official MSI (checksum-verified). |
 | `uv` | uv, the Python package and project manager. |
+| `shell` | Interactive PowerShell: fzf, fd, ripgrep, bat and eza via mise; [PSFzf](https://github.com/kelleyma49/PSFzf) (Ctrl+T for paths, Ctrl+R for history) in PowerShell 7; and a `profile.d` setup, see below. |
 | `neovim` | Prerequisites for [LazyVim](https://www.lazyvim.org): fzf, ripgrep, fd, lazygit, tree-sitter and ast-grep in mise's global config (with mise's shims on PATH), WinLibs gcc for tree-sitter parsers, JetBrainsMono Nerd Font as Windows Terminal's default font, Neovim's providers (a uv venv with pynvim, the `neovim` npm package and gem), lazy.nvim's Lua 5.1 + LuaRocks (hererocks), and removes an old winget/MSI Neovim that shadowed Scoop's. Neovim itself is a Scoop app; the LazyVim config isn't managed yet. Requires `git`, `uv`, `node`, `ruby`. |
 
 **Development stacks**, adapted from
@@ -136,6 +137,25 @@ Settings marked Windows 11 are harmless on Windows 10: they're just registry val
 | `powershell` | VS Code's PowerShell and Pester extensions, and PSScriptAnalyzer settings with the recommended rules. |
 | `winforms` | Visual Studio's .NET desktop workload (plus `system`, for Developer Mode). |
 | `winui` | Visual Studio's .NET desktop, UWP and Windows App SDK (C#) components, the `winapp` CLI and the Windows App Runtime 1.6 (plus `system`, for Developer Mode). |
+### PowerShell profile.d
+
+Rather than appending snippets to the PowerShell profile (which gets hard to keep idempotent), the
+`shell` workload adds one marked block to the all-hosts profile of both editions
+(`Documents\PowerShell\profile.ps1` and `Documents\WindowsPowerShell\profile.ps1`) that
+dot-sources `~\.config\powershell\profile.d\*.ps1` in name order, each in its own `try`. A failing
+snippet warns instead of breaking the shell.
+
+The snippets come from `configuration/powershell/profile.d` in this repo, and carry a
+`windows-setup: managed file` header. Files with that header are overwritten when the repo's copy
+changes and removed when it's deleted; anything else you put in that directory is left alone. The
+loader block is replaced in place when it changes, so the rest of your profile stays untouched.
+
+| Snippet | What it does |
+|---|---|
+| `00-mise.ps1` | [mise](https://mise.jdx.dev) activation (PATH and per-directory tool versions), first so later snippets see its tools. PowerShell 7 only; 5.1 uses mise's shims. |
+| `10-fzf.ps1` | Points fzf at `fd` (or ripgrep) and sets default options. |
+| `20-psfzf.ps1` | PSFzf's Ctrl+T and Ctrl+R bindings, with `-EnableFd`. PowerShell 7 with an interactive host only. |
+
 ### Hardware profiles
 
 `configuration/hardware.psd1` lists extra configurations that apply only to matching

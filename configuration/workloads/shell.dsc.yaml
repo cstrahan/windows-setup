@@ -1,0 +1,137 @@
+# Interactive PowerShell setup: CLI tools, PSFzf, and a profile.d directory of snippets.
+#
+# Rather than appending tweaks to the profile itself (which gets unmanageable to keep idempotent),
+# the profile gets one marked loader block that dot-sources ~\.config\powershell\profile.d\*.ps1,
+# and each concern is a file there, copied from this repo's configuration\powershell\profile.d.
+#
+# PowerShellScript steps: DSC v3 runs setScript without testing first, so each setScript starts
+# by running the test itself. getScript outputs nothing (`return`, not `'$null'`, which
+# is output [null]), so a set that prints nothing matches it and reports no change.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+parameters:
+  # configure.ps1 passes the repo's path; the snippets are copied from it.
+  repoRoot:
+    type: string
+resources:
+  # fzf and the tools its searches and previews use.
+  - name: shellTools
+    type: WindowsSetup.MiseTools/MiseTools
+    properties:
+      Name: shell
+      Tools: [fzf, fd, ripgrep, bat, eza]
+
+  # PSFzf, for PowerShell 7 only: Windows PowerShell 5.1 ships PSReadLine 2.0, older than PSFzf's
+  # key handlers expect, and has no NuGet provider for PowerShellGet. Installed for the current
+  # user (Documents\PowerShell\Modules), like Install-PSResource in an interactive session.
+  - name: psfzf
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    properties:
+      getScript: 'return'
+      testScript: |
+        # Not starting with "[": dsc parses a property that does as an expression.
+        $installed = Get-Module PSFzf -ListAvailable
+        [bool] $installed
+      setScript: |
+        if (Get-Module PSFzf -ListAvailable) { return }
+        Install-PSResource -Name PSFzf -Scope CurrentUser -TrustRepository -ErrorAction Stop
+        "installed PSFzf $((Get-Module PSFzf -ListAvailable | Select-Object -First 1).Version)"
+
+  # The snippets themselves. Managed files carry a "windows-setup: managed file" header: they're
+  # overwritten when the repo's copy changes, and removed when it's gone. Other files in the
+  # directory (yours) are left alone.
+  - name: profileSnippets
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    properties:
+      input: "[parameters('repoRoot')]"
+      getScript: |
+        param($Root)
+        return
+      testScript: |
+        param($Root)
+        $source = Join-Path $Root 'configuration\powershell\profile.d'
+        $destination = Join-Path $HOME '.config\powershell\profile.d'
+        $wanted = @(Get-ChildItem -LiteralPath $source -Filter *.ps1 -ErrorAction SilentlyContinue)
+        $stale = @(Get-ChildItem -LiteralPath $destination -Filter *.ps1 -ErrorAction SilentlyContinue |
+            Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -match 'windows-setup: managed file' } |
+            Where-Object { $_.Name -notin $wanted.Name })
+        $differing = @($wanted | Where-Object {
+            $copy = Join-Path $destination $_.Name
+            -not (Test-Path -LiteralPath $copy) -or
+                (Get-Content -LiteralPath $copy -Raw) -ne (Get-Content -LiteralPath $_.FullName -Raw)
+        })
+        -not $stale -and -not $differing
+      setScript: |
+        param($Root)
+        $source = Join-Path $Root 'configuration\powershell\profile.d'
+        $destination = Join-Path $HOME '.config\powershell\profile.d'
+        New-Item -ItemType Directory -Path $destination -Force | Out-Null
+        $wanted = @(Get-ChildItem -LiteralPath $source -Filter *.ps1 -ErrorAction SilentlyContinue)
+        foreach ($file in $wanted) {
+            $copy = Join-Path $destination $file.Name
+            if ((Test-Path -LiteralPath $copy) -and (Get-Content -LiteralPath $copy -Raw) -eq (Get-Content -LiteralPath $file.FullName -Raw)) { continue }
+            Copy-Item -LiteralPath $file.FullName -Destination $copy -Force
+            "installed profile.d\$($file.Name)"
+        }
+        foreach ($file in Get-ChildItem -LiteralPath $destination -Filter *.ps1) {
+            if ($file.Name -in $wanted.Name) { continue }
+            if ((Get-Content -LiteralPath $file.FullName -Raw) -notmatch 'windows-setup: managed file') { continue }
+            [IO.File]::Delete($file.FullName)
+            "removed profile.d\$($file.Name) (no longer in the repo)"
+        }
+
+  # The loader block in both editions' all-hosts profile (PowerShell 7 and Windows PowerShell), so
+  # it also applies in VS Code's terminal. Replaced in place when this block changes; anything else
+  # in the profile is left alone.
+  - name: profileLoader
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    dependsOn:
+      - "[resourceId('Microsoft.DSC.Transitional/PowerShellScript', 'profileSnippets')]"
+    properties:
+      input: |
+        # >>> windows-setup profile.d >>>
+        # Loads ~\.config\powershell\profile.d\*.ps1 in name order. Managed by windows-setup:
+        # edit the snippets, not this block.
+        $windowsSetupProfileD = Join-Path $HOME '.config\powershell\profile.d'
+        if (Test-Path -LiteralPath $windowsSetupProfileD) {
+            foreach ($snippet in Get-ChildItem -LiteralPath $windowsSetupProfileD -Filter *.ps1 | Sort-Object Name) {
+                try { . $snippet.FullName } catch { Write-Warning "profile.d: $($snippet.Name) failed: $($_.Exception.Message)" }
+            }
+        }
+        # <<< windows-setup profile.d <<<
+      getScript: |
+        param($Block)
+        return
+      testScript: |
+        param($Block)
+        # The block comes from YAML with LF endings; profiles are CRLF.
+        $crlf = [regex]::Replace($Block.TrimEnd(), "\r?\n", "`r`n")
+        $missing = foreach ($relative in 'Documents\PowerShell\profile.ps1', 'Documents\WindowsPowerShell\profile.ps1') {
+            $path = Join-Path $HOME $relative
+            $text = if (Test-Path -LiteralPath $path) { [IO.File]::ReadAllText($path) } else { '' }
+            if (-not $text.Contains($crlf)) { $path }
+        }
+        -not $missing
+      setScript: |
+        param($Block)
+        $crlf = [regex]::Replace($Block.TrimEnd(), "\r?\n", "`r`n")
+        $start = '# >>> windows-setup profile.d >>>'
+        $end = '# <<< windows-setup profile.d <<<'
+        foreach ($relative in 'Documents\PowerShell\profile.ps1', 'Documents\WindowsPowerShell\profile.ps1') {
+            $path = Join-Path $HOME $relative
+            $text = if (Test-Path -LiteralPath $path) { [IO.File]::ReadAllText($path) } else { '' }
+            if ($text.Contains($crlf)) { continue }
+            New-Item -ItemType Directory -Path (Split-Path $path) -Force | Out-Null
+            $from = $text.IndexOf($start)
+            $to = $text.IndexOf($end)
+            if ($from -ge 0 -and $to -gt $from) {
+                # An older version of the block: replace it where it is.
+                $updated = $text.Substring(0, $from) + $crlf + $text.Substring($to + $end.Length)
+                $what = 'updated'
+            } else {
+                $separator = if ($text.Trim()) { "`r`n`r`n" } else { '' }
+                $updated = $text.TrimEnd() + $separator + $crlf + "`r`n"
+                $what = 'added'
+            }
+            [IO.File]::WriteAllText($path, $updated, [Text.UTF8Encoding]::new($false))
+            "$what the profile.d loader in $relative"
+        }

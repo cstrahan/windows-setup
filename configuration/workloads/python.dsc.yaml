@@ -1,5 +1,9 @@
 # Python 3.14 from python.org (from microsoft/WindowsDeveloperConfig's python workload). uv is
 # its own workload.
+#
+# PowerShellScript steps: DSC v3 runs setScript without testing first, so each setScript starts
+# by running the test itself. getScript outputs nothing (`return`, not `'$null'`, which
+# is output [null]), so a set that prints nothing matches it and reports no change.
 $schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
 resources:
   - name: python
@@ -8,3 +12,35 @@ resources:
       id: Python.Python.3.14
       source: winget
       acceptAgreements: true
+
+  # App Installer's "App execution aliases" for python.exe and python3.exe: 0-byte reparse points
+  # in %LOCALAPPDATA%\Microsoft\WindowsApps that open the Microsoft Store. python.org's installer
+  # provides no python3.exe, so `python3` (which Neovim's provider and Unix-style tools try first)
+  # resolved to the Store stub. Removing them is what Settings > Apps > App execution aliases does.
+  # Only App Installer's (reparse data naming its PythonRedirector) are removed, never a real Store
+  # Python's. App Installer updates may restore them; the next run removes them again.
+  - name: noStorePythonAliases
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    properties:
+      getScript: 'return'
+      testScript: |
+        $found = foreach ($name in 'python.exe', 'python3.exe') {
+            $path = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\$name"
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            $dump = fsutil reparsepoint query $path 2>$null | Out-String
+            $hex = ($dump -split "`n" | Where-Object { $_ -match '^\s*[0-9a-f]{4}:\s' } | ForEach-Object { $_ -replace '^\s*[0-9a-f]{4}:\s+((?:[0-9a-f]{2}\s+){1,16}).*$', '$1' }) -join ' '
+            $bytes = [byte[]] @($hex -split '\s+' | Where-Object { $_ } | ForEach-Object { [Convert]::ToByte($_, 16) })
+            if ([Text.Encoding]::Unicode.GetString($bytes) -match 'DesktopAppInstaller_8wekyb3d8bbwe!PythonRedirector') { $path }
+        }
+        -not $found
+      setScript: |
+        foreach ($name in 'python.exe', 'python3.exe') {
+            $path = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\$name"
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            $dump = fsutil reparsepoint query $path 2>$null | Out-String
+            $hex = ($dump -split "`n" | Where-Object { $_ -match '^\s*[0-9a-f]{4}:\s' } | ForEach-Object { $_ -replace '^\s*[0-9a-f]{4}:\s+((?:[0-9a-f]{2}\s+){1,16}).*$', '$1' }) -join ' '
+            $bytes = [byte[]] @($hex -split '\s+' | Where-Object { $_ } | ForEach-Object { [Convert]::ToByte($_, 16) })
+            if ([Text.Encoding]::Unicode.GetString($bytes) -notmatch 'DesktopAppInstaller_8wekyb3d8bbwe!PythonRedirector') { continue }
+            [IO.File]::Delete($path)
+            "removed App Installer's $name alias (Microsoft Store placeholder)"
+        }

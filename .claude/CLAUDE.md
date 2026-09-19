@@ -310,6 +310,88 @@ Gotchas:
   `Microsoft.DSC.Transitional/PowerShellScript` resource whose scripts write diagnostics, and run
   `dsc config set --file logs\x.dsc.yaml --output-format json` directly from your shell.
 - **`wsl.exe` output** is UTF-16LE unless `WSL_UTF8=1` is set; `configure.ps1` handles both.
+- **Running things outside the AppData sandbox, unelevated:** `logs\unsandboxed.dsc.yaml` (git-
+  ignored; recreate if missing) is a PowerShellScript resource whose setScript refreshes PATH and
+  runs `logs\step.ps1` with all output to `logs\step.log`. `dsc config set --file
+  logs\unsandboxed.dsc.yaml` from your shell then runs the step for real (dsc's package context),
+  with no UAC. Use it for anything that must write the user's real `%LOCALAPPDATA%` (Neovim's
+  config and data, mise installs). Reading those locations from your own shell is fine.
+
+## Neovim / LazyVim (set up by hand on 2026-09-19; config not managed yet)
+
+The `neovim` workload handles the prerequisites; the LazyVim config itself was installed manually
+with the steps below. Paths: config `%LOCALAPPDATA%\nvim` (the LazyVim starter, `.git` removed),
+data `%LOCALAPPDATA%\nvim-data` (plugins in `lazy\`, parsers in `site\parser`, Mason in `mason\`).
+The earlier `nvim-data` (only shada/swap from Neovim 0.10) is at `nvim-data.bak`.
+
+- **Neovim version:** an old winget MSI Neovim 0.10.3 (`C:\Program Files\Neovim`, machine PATH)
+  shadowed Scoop's 0.12.5 (user PATH). LazyVim needs 0.11.2+. The workload uninstalls the MSI
+  (`Neovim.Neovim`, `_exist: false`); Scoop's is the only one.
+- **CLI tools** (fzf, ripgrep, fd, lazygit, tree-sitter, ast-grep) come from mise's global config
+  (`~\.config\mise\config.toml`, alongside the user's `node`). mise's `windows_shim_mode` is `exe`
+  (real executables, which plugins can spawn directly, unlike `.cmd` shims), and the workload puts
+  `%LOCALAPPDATA%\mise\shims` on the user PATH, since `mise activate` only happens in PowerShell 7
+  profiles. The Windows PowerShell 5.1 profile now activates mise only on 7+ (on 5.1 it printed
+  "chpwd functionality requires PowerShell version 7" on every start; snacks' health showed it).
+- **Install steps** (through the unsandboxed runner above):
+  1. Move `nvim` / `nvim-data` aside, `git clone https://github.com/LazyVim/starter
+     %LOCALAPPDATA%\nvim`, delete its `.git`.
+  2. `nvim --headless "+Lazy! sync" +qa` (33 plugins, ~15 s).
+  3. Parsers and LSP: a Lua script run with `nvim --headless "+luafile ..." +qa!`:
+     `require('nvim-treesitter').install(LazyVim.opts('nvim-treesitter').ensure_installed):wait(...)`
+     (23 languages), and Mason's `lua-language-server`. **Wait on Mason's install callback**
+     (`pkg:install({}, function(success) ... end)`, then `vim.wait` on a flag): polling
+     `is_installed()` returned true while the install was still running, and quitting aborted it
+     ("Neovim exited while the following packages were installing").
+- **Health checks headless:** `:LazyHealth` wrote an empty buffer (the checks run async in 0.12).
+  This works: `nvim --headless "+Lazy! load all" "+checkhealth" "+sleep 15" "+w! <file>" "+qa!"`.
+  Headless artifacts to ignore: snacks' "setup did not run", "`vim.ui.input`/`vim.ui.select` not
+  set", "is not ready" (snacks sets these up with a UI).
+- **C compiler / tree-sitter parsers:** nvim-treesitter (main) builds parsers with `tree-sitter
+  build`, whose `cc` crate finds MSVC by itself (vswhere): with gcc hidden, no `CC` and no `cl` on
+  PATH, nvim-treesitter built and loaded parsers with VS 2026's MSVC (linker 14.51). But LazyVim's
+  pre-check (`lua/lazyvim/util/treesitter.lua`, `M.check`/`win_find_cl`) only accepts `$CC`,
+  `cl`/`gcc` on PATH, or `cl.exe` under `C:\Program Files (x86)\Microsoft Visual Studio` (the
+  standalone Build Tools), so VS 2022/2026 in `C:\Program Files` fails it and LazyVim skips
+  installing parsers. Workarounds tested: `CC=<path to cl.exe>` **breaks** the build (bypasses
+  the crate's environment setup: `stdio.h` not found); MSVC's bin dir on PATH works but also puts
+  `link`, `lib`, `nmake`, ... on PATH. Chosen: WinLibs gcc (winget, LazyVim's own suggestion);
+  with gcc on PATH LazyVim sets `CC=gcc`. An upstream LazyVim fix (find cl.exe via vswhere) was
+  proposed to the user; as of 2026-09-19 no LazyVim issue/PR covered it.
+- **Providers** (`vim.provider` health is all green): the `neovim` workload installs each, and
+  `%LOCALAPPDATA%\nvim\lua\config\options.lua` (edited by hand) pins them on Windows:
+  `g:python3_host_prog` = `stdpath('data')/python-provider/Scripts/python.exe` (a `uv venv` with
+  pynvim; `python3` on PATH used to be App Installer's Store stub, which the `python` workload now
+  removes), `g:node_host_prog` = `$APPDATA/npm/node_modules/neovim/bin/cli.js` (installed with the
+  winget Node's `npm.cmd` explicitly, since activated PowerShell puts mise's node first; Neovim
+  runs `node <cli.js>`), Ruby found via `neovim-ruby-host.bat` on PATH (the `neovim` gem in the
+  ruby workload's Ruby 3.4), and `g:loaded_perl_provider = 0` (mise's Perl,
+  skaji/relocatable-perl, has no Windows builds; the user chose no Perl).
+- **Old Ruby 3.2.4** (RubyInstaller, installed by hand for the user only) was uninstalled with
+  winget, which refuses user-scope packages from an elevated session ("cannot be uninstalled when
+  running with administrator privileges"): run it unelevated. Its silent uninstaller left
+  `C:\Ruby32-x64\msys64` (865 MB) behind; the user was told to delete it.
+- **lazy.nvim's hererocks** (`stdpath('data')\lazy-rocks\hererocks`, Lua 5.1.5 + LuaRocks 3.8.0) is
+  prebuilt by the workload with `uvx hererocks <root> -l 5.1 -r latest --target mingw`:
+  - It failed with "couldn't run install.bat /?: is install.bat in PATH?" only because **Claude's
+    shells set `NoDefaultCurrentDirectoryInExePath=1`** (the user's environment doesn't), which
+    stops Windows from finding programs in the current directory. Not a Python 3.12+ issue (it
+    failed on 3.11 too). Clear the variable before running things that rely on it.
+  - hererocks can't build newer LuaRocks on Windows (`-r 3.12.2` silently skipped it).
+  - LuaRocks 3.8.0 links C rocks with `-lMSVCR80`, so they build but fail to load ("The specified
+    module could not be found"). `luarocks config --scope system variables.MSVCRT ucrt` (stored in
+    hererocks' own `luarocks\config-5.1.lua`) makes it link `-lucrt`, matching WinLibs; lpeg then
+    built and loaded. Without `--scope system` it writes the per-user `%APPDATA%\luarocks` config.
+  - lazy's health still reports "`.../hererocks/bin/luarocks` not installed": a lazy.nvim bug on
+    Windows. Its install path appends `.bat` (`lua/lazy/pkg/rockspec.lua`, ~line 155) but its
+    health check doesn't (~line 80). Harmless.
+- **Remaining health warnings, judged harmless:** Mason's missing unzip/wget/gzip/7z/php/julia
+  (it unpacked lua-language-server fine with Windows' own tools); lazy's luarocks error (see
+  hererocks above); `site\pack\core` existing packages / vim.pack lockfile (an empty
+  folder Neovim 0.12's built-in `vim.pack` creates); snacks' image tools (kitty/wezterm/ghostty
+  graphics, magick, gs, tectonic, mmdc: Windows Terminal lacks the kitty graphics protocol);
+  conform's `fish_indent`; blink.cmp's first-run "fuzzy lib not downloaded" (it downloads on
+  first start; fine afterwards).
 
 ## Future directions
 

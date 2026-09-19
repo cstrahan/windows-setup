@@ -1,0 +1,213 @@
+# Neovim prerequisites for LazyVim (https://www.lazyvim.org). Neovim itself comes from Scoop
+# (bootstrap.ps1's $ScoopApps); the LazyVim config isn't managed here yet (see .claude/CLAUDE.md,
+# "Neovim / LazyVim"). Requires git (LazyVim clones its plugins with it), and uv, node and ruby
+# for the providers below.
+#
+# PowerShellScript steps: DSC v3 runs setScript without testing first, so each setScript starts
+# by running the test itself. getScript outputs nothing (`return`, not `'$null'`, which
+# is output [null]), so a set that prints nothing matches it and reports no change.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  # An older winget/MSI Neovim in C:\Program Files\Neovim sits on the machine PATH, ahead of
+  # Scoop's (user PATH), and shadows it. LazyVim needs Neovim 0.11.2+.
+  - name: noMsiNeovim
+    type: Microsoft.WinGet/Package
+    properties:
+      id: Neovim.Neovim
+      source: winget
+      _exist: false
+
+  # LazyVim's command-line tools, in mise's global config (~\.config\mise\config.toml):
+  # fzf, ripgrep and fd for fzf-lua; lazygit; tree-sitter (the CLI) for nvim-treesitter; ast-grep
+  # for grug-far's structural search.
+  - name: miseTools
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    properties:
+      input: [fzf, ripgrep, fd, lazygit, tree-sitter, ast-grep]
+      getScript: |
+        param($Tools)
+        return
+      testScript: |
+        param($Tools)
+        $env:Path = ([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User') | Where-Object { $_ }) -join ';'
+        if (-not (Get-Command mise -ErrorAction SilentlyContinue)) { return $false }
+        $global = mise ls --global --json 2>$null | ConvertFrom-Json -AsHashtable
+        -not @($Tools | Where-Object { -not $global -or -not $global.ContainsKey($_) -or -not @($global[$_] | Where-Object { $_['installed'] }) })
+      setScript: |
+        param($Tools)
+        $env:Path = ([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User') | Where-Object { $_ }) -join ';'
+        if (-not (Get-Command mise -ErrorAction SilentlyContinue)) { throw 'mise is not on PATH (bootstrap.ps1 installs it with Scoop)' }
+        $global = mise ls --global --json 2>$null | ConvertFrom-Json -AsHashtable
+        $missing = @($Tools | Where-Object { -not $global -or -not $global.ContainsKey($_) -or -not @($global[$_] | Where-Object { $_['installed'] }) })
+        foreach ($tool in $missing) {
+            $output = & mise use --global "$tool@latest" 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "mise use --global $tool@latest failed ($LASTEXITCODE): $(($output | Select-Object -Last 5) -join ' ')" }
+            "installed $tool with mise"
+        }
+
+  # mise's shims (real .exe files, windows_shim_mode = exe) on the user PATH, so its tools work
+  # where mise isn't activated, e.g. Neovim started outside PowerShell. Activated shells put the
+  # tools' own directories first anyway.
+  - name: miseShimsOnPath
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    dependsOn:
+      - "[resourceId('Microsoft.DSC.Transitional/PowerShellScript', 'miseTools')]"
+    properties:
+      getScript: 'return'
+      testScript: |
+        $shims = Join-Path $env:LOCALAPPDATA 'mise\shims'
+        [bool] ((([Environment]::GetEnvironmentVariable('Path', 'User')) -split ';') -contains $shims)
+      setScript: |
+        $shims = Join-Path $env:LOCALAPPDATA 'mise\shims'
+        $path = [Environment]::GetEnvironmentVariable('Path', 'User')
+        if (($path -split ';') -contains $shims) { return }
+        [Environment]::SetEnvironmentVariable('Path', (@($path -split ';' | Where-Object { $_ }) + $shims) -join ';', 'User')
+        "added $shims to the user PATH"
+
+  # A C compiler for nvim-treesitter's parsers (`tree-sitter build`). LazyVim's check only looks
+  # for cc/cl/gcc on PATH, $CC, or cl.exe under C:\Program Files (x86)\Microsoft Visual Studio, so
+  # Visual Studio 2022/2026's MSVC (C:\Program Files) goes unnoticed even though `tree-sitter
+  # build` finds and uses it fine. WinLibs' gcc is what LazyVim suggests; with gcc on PATH it sets
+  # CC=gcc. (Portable zip: winget links its commands into %LOCALAPPDATA%\Microsoft\WinGet\Links.)
+  - name: winlibsGcc
+    type: Microsoft.WinGet/Package
+    properties:
+      id: BrechtSanders.WinLibs.POSIX.UCRT
+      source: winget
+      acceptAgreements: true
+
+  # --- Providers and rocks -----------------------------------------------------------------
+  # Neovim's remote-plugin providers, each pinned by a g:*_host_prog line in the LazyVim config
+  # (see .claude/CLAUDE.md, "Neovim / LazyVim"). The perl provider is disabled there instead.
+
+  # Python: a dedicated venv with pynvim in Neovim's data dir, so the global Python stays clean and
+  # Neovim doesn't depend on what `python3` resolves to. Recreated if missing or broken.
+  - name: pythonProvider
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    properties:
+      getScript: 'return'
+      testScript: |
+        $python = Join-Path $env:LOCALAPPDATA 'nvim-data\python-provider\Scripts\python.exe'
+        if (-not (Test-Path -LiteralPath $python)) { return $false }
+        & $python -c 'import pynvim' 2>$null
+        $LASTEXITCODE -eq 0
+      setScript: |
+        $env:Path = ([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User') | Where-Object { $_ }) -join ';'
+        $venv = Join-Path $env:LOCALAPPDATA 'nvim-data\python-provider'
+        $python = Join-Path $venv 'Scripts\python.exe'
+        if (Test-Path -LiteralPath $python) { & $python -c 'import pynvim' 2>$null; if ($LASTEXITCODE -eq 0) { return } }
+        $output = & uv venv --clear $venv 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "uv venv $venv failed ($LASTEXITCODE): $($output -join ' ')" }
+        $output = & uv pip install --python $python pynvim 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "uv pip install pynvim failed ($LASTEXITCODE): $($output -join ' ')" }
+        "created $venv with pynvim"
+
+  # Node: the `neovim` npm package, installed with the node workload's npm (not mise's node), into
+  # npm's default global prefix, %APPDATA%\npm.
+  - name: nodeProvider
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    properties:
+      getScript: 'return'
+      testScript: |
+        Test-Path -LiteralPath (Join-Path $env:APPDATA 'npm\node_modules\neovim\bin\cli.js')
+      setScript: |
+        if (Test-Path -LiteralPath (Join-Path $env:APPDATA 'npm\node_modules\neovim\bin\cli.js')) { return }
+        $npm = Join-Path $env:ProgramFiles 'nodejs\npm.cmd'
+        if (-not (Test-Path -LiteralPath $npm)) { throw "$npm not found (the node workload installs Node.js)" }
+        $output = & $npm install --global --no-fund --no-audit neovim 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "npm install --global neovim failed ($LASTEXITCODE): $($output -join ' ')" }
+        'installed the neovim npm package'
+
+  # Ruby: the `neovim` gem, in the ruby workload's Ruby. It adds neovim-ruby-host.bat to Ruby's bin.
+  - name: rubyProvider
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    properties:
+      getScript: 'return'
+      testScript: |
+        $env:Path = ([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User') | Where-Object { $_ }) -join ';'
+        if (-not (Get-Command gem -ErrorAction SilentlyContinue)) { return $false }
+        "$(& gem list --installed neovim 2>$null)".Trim() -eq 'true'
+      setScript: |
+        $env:Path = ([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User') | Where-Object { $_ }) -join ';'
+        if (-not (Get-Command gem -ErrorAction SilentlyContinue)) { throw 'gem is not on PATH (the ruby workload installs Ruby)' }
+        if ("$(& gem list --installed neovim 2>$null)".Trim() -eq 'true') { return }
+        $output = & gem install --no-document neovim 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "gem install neovim failed ($LASTEXITCODE): $(($output | Select-Object -Last 8) -join ' ')" }
+        'installed the neovim gem'
+
+  # lazy.nvim's own Lua 5.1 + LuaRocks ("hererocks"), prebuilt where lazy looks for it
+  # (stdpath('data')\lazy-rocks\hererocks), with WinLibs gcc. lazy would otherwise only build it
+  # when a plugin needs rocks, and reports it missing. hererocks runs LuaRocks' install.bat from its
+  # working directory, which fails with NoDefaultCurrentDirectoryInExePath set (Claude's shells set
+  # it), so that's cleared for the build. LuaRocks 3.8.0 (hererocks' "latest"; it can't build newer
+  # ones on Windows) links C rocks against MSVCR80, which doesn't exist here, so they build but
+  # don't load; MSVCRT=ucrt (in hererocks' own config, --scope system) matches WinLibs' runtime.
+  - name: lazyHererocks
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    dependsOn:
+      - "[resourceId('Microsoft.WinGet/Package', 'winlibsGcc')]"
+    properties:
+      getScript: 'return'
+      testScript: |
+        $bin = Join-Path $env:LOCALAPPDATA 'nvim-data\lazy-rocks\hererocks\bin'
+        if (-not (Test-Path -LiteralPath (Join-Path $bin 'lua.exe')) -or -not (Test-Path -LiteralPath (Join-Path $bin 'luarocks.bat'))) { return $false }
+        "$(& (Join-Path $bin 'luarocks.bat') config variables.MSVCRT 2>$null)".Trim() -eq 'ucrt'
+      setScript: |
+        $env:Path = ([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User') | Where-Object { $_ }) -join ';'
+        $env:NoDefaultCurrentDirectoryInExePath = $null
+        $root = Join-Path $env:LOCALAPPDATA 'nvim-data\lazy-rocks\hererocks'
+        $luarocks = Join-Path $root 'bin\luarocks.bat'
+        if (-not (Test-Path -LiteralPath (Join-Path $root 'bin\lua.exe')) -or -not (Test-Path -LiteralPath $luarocks)) {
+            $output = & uvx hererocks $root -l 5.1 -r latest --target mingw 2>&1
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $luarocks)) { throw "hererocks failed ($LASTEXITCODE): $(($output | Select-Object -Last 5) -join ' ')" }
+            "built Lua 5.1 + LuaRocks in $root"
+        }
+        if ("$(& $luarocks config variables.MSVCRT 2>$null)".Trim() -ne 'ucrt') {
+            $output = & $luarocks config --scope system variables.MSVCRT ucrt 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "luarocks config MSVCRT failed ($LASTEXITCODE): $($output -join ' ')" }
+            'set LuaRocks MSVCRT=ucrt (C rocks link against the UCRT)'
+        }
+
+  # A Nerd Font (v3+) for LazyVim's icons.
+  - name: jetBrainsMonoNerdFont
+    type: Microsoft.WinGet/Package
+    properties:
+      id: DEVCOM.JetBrainsMonoNerdFont
+      source: winget
+      acceptAgreements: true
+
+  # ... as Windows Terminal's default font. settings.json is only edited if it has no comments
+  # (round-tripping JSON would drop them); otherwise this warns and leaves it alone.
+  - name: terminalNerdFont
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    dependsOn:
+      - "[resourceId('Microsoft.WinGet/Package', 'jetBrainsMonoNerdFont')]"
+    properties:
+      input: JetBrainsMono Nerd Font
+      getScript: |
+        param($Face)
+        return
+      testScript: |
+        param($Face)
+        $path = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json'
+        if (-not (Test-Path $path)) { return $true }  # Terminal hasn't run yet; nothing to edit
+        try { $settings = Get-Content $path -Raw | ConvertFrom-Json -AsHashtable } catch { return $false }
+        $defaults = $settings['profiles']['defaults']
+        [bool] ($defaults -and $defaults['font'] -and $defaults['font']['face'] -eq $Face)
+      setScript: |
+        param($Face)
+        $path = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json'
+        if (-not (Test-Path $path)) { return }
+        $raw = [IO.File]::ReadAllText($path)
+        $settings = $raw | ConvertFrom-Json -AsHashtable
+        if ($settings['profiles']['defaults'] -and $settings['profiles']['defaults']['font'] -and $settings['profiles']['defaults']['font']['face'] -eq $Face) { return }
+        if ($raw -match '(?m)^\s*//|/\*') {
+            Write-Warning "Windows Terminal's settings.json has comments, which rewriting would drop; set profiles.defaults.font.face to `"$Face`" by hand."
+            return
+        }
+        if (-not $settings['profiles']['defaults']) { $settings['profiles']['defaults'] = [ordered]@{} }
+        if (-not $settings['profiles']['defaults']['font']) { $settings['profiles']['defaults']['font'] = [ordered]@{} }
+        $settings['profiles']['defaults']['font']['face'] = $Face
+        Copy-Item -LiteralPath $path -Destination "$path.bak" -Force
+        [IO.File]::WriteAllText($path, ($settings | ConvertTo-Json -Depth 100), [Text.UTF8Encoding]::new($false))
+        "set Windows Terminal's default font to $Face (backup: settings.json.bak)"

@@ -118,6 +118,7 @@ Settings marked Windows 11 are harmless on Windows 10: they're just registry val
 | `git` | Git for Windows, latest version, with pinned installer choices: Explorer integration, VS Code as editor, Windows OpenSSH, line endings, a Terminal profile, etc. Changing a choice re-runs the installer. Requires `ssh`, `vscode`, `terminal`. |
 | `go` | Go, latest stable release (at least 1.27.1), from go.dev's official MSI (checksum-verified). |
 | `uv` | uv, the Python package and project manager. |
+| `neovim` | Prerequisites for [LazyVim](https://www.lazyvim.org): fzf, ripgrep, fd, lazygit, tree-sitter and ast-grep in mise's global config (with mise's shims on PATH), WinLibs gcc for tree-sitter parsers, JetBrainsMono Nerd Font as Windows Terminal's default font, Neovim's providers (a uv venv with pynvim, the `neovim` npm package and gem), lazy.nvim's Lua 5.1 + LuaRocks (hererocks), and removes an old winget/MSI Neovim that shadowed Scoop's. Neovim itself is a Scoop app; the LazyVim config isn't managed yet. Requires `git`, `uv`, `node`, `ruby`. |
 
 **Development stacks**, adapted from
 [microsoft/WindowsDeveloperConfig](https://github.com/microsoft/WindowsDeveloperConfig)'s workloads:
@@ -127,8 +128,10 @@ Settings marked Windows 11 are harmless on Windows 10: they're just registry val
 | `visualstudio` | Visual Studio 2026 Community (required by `rust`, `winforms`, `winui`). |
 | `dotnet` | .NET 10 SDK. |
 | `java` | Microsoft Build of OpenJDK 25. |
-| `python` | Python 3.14 (with the `py` launcher). |
-| `typescript` | Node.js LTS, and TypeScript (`tsc`) globally via npm. |
+| `python` | Python 3.14 (with the `py` launcher), and removes App Installer's `python.exe`/`python3.exe` App execution aliases (Microsoft Store placeholders that `python3` otherwise resolves to). |
+| `node` | Node.js LTS (winget, machine-wide). |
+| `typescript` | TypeScript (`tsc`) globally via npm. Requires `node`. |
+| `ruby` | Ruby 3.4 (RubyInstaller) with the MSYS2 devkit. |
 | `rust` | rustup with the stable toolchain as default, and Visual Studio's C++ workload for the MSVC linker and Windows SDK. |
 | `powershell` | VS Code's PowerShell and Pester extensions, and PSScriptAnalyzer settings with the recommended rules. |
 | `winforms` | Visual Studio's .NET desktop workload (plus `system`, for Developer Mode). |

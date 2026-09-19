@@ -15,9 +15,9 @@
         # Windows
         'ssh', 'time', 'system', 'remote-desktop', 'explorer', 'taskbar', 'keyboard'
         # Tools
-        'terminal', 'vscode', 'git', 'go', 'uv'
+        'terminal', 'vscode', 'git', 'go', 'uv', 'neovim'
         # Development stacks (mostly from microsoft/WindowsDeveloperConfig's src/Workloads)
-        'dotnet', 'java', 'python', 'typescript', 'rust', 'powershell', 'winforms', 'winui'
+        'dotnet', 'java', 'python', 'node', 'typescript', 'ruby', 'rust', 'powershell', 'winforms', 'winui'
     )
 
     Workloads = @{
@@ -47,6 +47,8 @@
                               Description = 'Go, latest stable from go.dev' }
         uv               = @{ Requires = @(); Commands = @('uv')
                               Description = 'uv, the Python package and project manager' }
+        neovim           = @{ Requires = @('git', 'uv', 'node', 'ruby'); Commands = @('nvim', 'fzf', 'rg', 'fd', 'lazygit', 'tree-sitter', 'ast-grep', 'gcc')
+                              Description = 'Prerequisites for LazyVim: CLI tools via mise, gcc, Nerd Font in Terminal, providers (python venv, npm, gem), lazy hererocks' }
         visualstudio     = @{ Requires = @(); Commands = @()
                               Description = 'Visual Studio 2026 Community' }
         dotnet           = @{ Requires = @(); Commands = @('dotnet')
@@ -54,9 +56,13 @@
         java             = @{ Requires = @(); Commands = @('java')
                               Description = 'Microsoft Build of OpenJDK 25' }
         python           = @{ Requires = @(); Commands = @('py')
-                              Description = 'Python 3.14 with the py launcher' }
-        typescript       = @{ Requires = @(); Commands = @('node', 'npm', 'tsc')
-                              Description = 'Node.js LTS and TypeScript' }
+                              Description = 'Python 3.14 with the py launcher; no Microsoft Store python/python3 aliases' }
+        node             = @{ Requires = @(); Commands = @('node', 'npm')
+                              Description = 'Node.js LTS (winget, machine-wide)' }
+        typescript       = @{ Requires = @('node'); Commands = @('tsc')
+                              Description = 'TypeScript compiler (tsc), global via npm' }
+        ruby             = @{ Requires = @(); Commands = @('ruby', 'gem')
+                              Description = 'Ruby 3.4 (RubyInstaller) with the MSYS2 devkit' }
         rust             = @{ Requires = @('visualstudio'); Commands = @('rustup', 'cargo', 'rustc')
                               Description = "rustup (stable), with Visual Studio's C++ workload for linking" }
         powershell       = @{ Requires = @('vscode'); Commands = @()

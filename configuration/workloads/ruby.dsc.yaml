@@ -1,0 +1,10 @@
+# Ruby 3.4 from RubyInstaller, with its MSYS2 devkit (for gems with native extensions). Neovim's
+# ruby provider (the neovim workload) installs its gem into it.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  - name: ruby
+    type: Microsoft.WinGet/Package
+    properties:
+      id: RubyInstallerTeam.RubyWithDevKit.3.4
+      source: winget
+      acceptAgreements: true

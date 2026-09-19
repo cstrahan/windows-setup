@@ -1,0 +1,11 @@
+# Node.js LTS, machine-wide, from winget (from microsoft/WindowsDeveloperConfig's typescript
+# workload). This is the managed Node: the typescript workload and Neovim's node provider use it.
+# (mise may also provide a node, first on PATH in activated PowerShell 7 sessions; that's separate.)
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  - name: node
+    type: Microsoft.WinGet/Package
+    properties:
+      id: OpenJS.NodeJS.LTS
+      source: winget
+      acceptAgreements: true

@@ -39,9 +39,9 @@ resources:
         - SerialIO_30.100.2104.1_PV_TGL_PCH_20H2v2\production\Windows10-x64\0\Drivers\WU\iaLPSS2_SPI_TGL.inf
         - SerialIO_30.100.2104.1_PV_TGL_PCH_20H2v2\production\Windows10-x64\0\Drivers\WU\iaLPSS2_UART2_TGL.inf
 
-  # Intel HID Event Filter 2.2.1.386 (ACPI\INT33D5): the firmware's "virtual buttons" (e.g. power
-  # button and airplane-mode events) reach Windows through it; without it the device has no
-  # driver (code 28). System76 added this zip for the gaze17, but its INF lists INT33D5 for
+  # Intel HID Event Filter 2.2.1.386 (ACPI\INT33D5): firmware hotkey events reach Windows through
+  # it. Without it the device has no driver (code 28) and some Fn keys, e.g. brightness, do
+  # nothing (volume still works). System76 added this zip for the gaze17, but its INF lists INT33D5 for
   # Windows 10 1803+ explicitly. Windows Update's optional alternative is 1.1.1.318 (2016).
   - name: intelHidEventFilter
     type: WindowsSetup.DriverPackage/DriverPackage
@@ -51,3 +51,25 @@ resources:
       Sha256: 040E5698E05BEF4A72769DC3B8168FE5EE804289FDC8C4809BE1D80810DE88F0
       Infs:
         - drivers\x64\HidEventFilter.inf
+
+  # Intel graphics 32.0.101.7088 for the Tiger Lake-H UHD Graphics (8086:9A60), from Intel's
+  # "11th-14th Gen Processor Graphics" download (legacy branch since 2025-09; quarterly releases).
+  # System76 doesn't list one and Windows Update left 30.0.101.2079 (2022). Intel has no lookup
+  # API and its download pages block scripts, so this is pinned; the mirror URL works. Switches
+  # and exit codes are from the package's installation_readme.txt: -s never downgrades a newer
+  # driver or restarts; --noExtras skips bundled extras (e.g. Intel's Driver & Support Assistant).
+  - name: intelGraphics
+    type: WindowsSetup.DriverInstaller/DriverInstaller
+    properties:
+      Name: Intel graphics (11th-14th gen)
+      HardwareIds:
+        - PCI\VEN_8086&DEV_9A60*
+      Version: 32.0.101.7088
+      Uri: https://downloadmirror.intel.com/922492/gfx_win_101.7088.exe
+      Sha256: 6C2CD36A5C68CF3AA8403073E5ED4592B8EE4BA5190F5776E483D974EAD5A2F8
+      Arguments: [-s, --noExtras]
+      # The .exe returns 1000 + Installer.exe's code (seen: its log said 14, the .exe 1014). Installer
+      # codes: 0 success, 14 restart required, 18 full shutdown required. 1000 is also what a failed
+      # self-check returns, which the device check afterwards catches.
+      SuccessExitCodes: [1000]
+      RestartExitCodes: [1014, 1018]

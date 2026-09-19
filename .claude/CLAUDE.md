@@ -215,12 +215,42 @@ Gotchas:
     already right. The resource reads the device property.
   - `ACPI\INT33D5` (Intel HID Event Filter) had no driver. Windows Update offered 1.1.1.318
     (2016) as an optional update; the profile installs System76's 2.2.1.386 (added for the gaze17;
-    its INF lists INT33D5 for Windows 10 1803+). Pending WU drivers, with hardware IDs, come from
+    its INF lists INT33D5 for Windows 10 1803+). Without it, some Fn hotkeys did nothing (e.g.
+    brightness; volume worked); with it, the user confirmed they all work. Pending WU drivers, with hardware IDs, come from
     `Microsoft.Update.Session` → `CreateUpdateSearcher().Search("IsInstalled=0 and Type='Driver'")`
     (works unelevated).
   - Still without drivers, deliberately: `ACPI\INTC1026` (the SCU/PMC IPC interface, per Linux's
     `intel_scu_pltdrv`; no Windows driver offered), `ACPI\17761776` (System76 ACPI),
-    `ACPI\BOOT0000` (coreboot tables).- **Installer logs** for packages winget installs are next to winget's own logs in
+    `ACPI\BOOT0000` (coreboot tables).- **GPU drivers** (2026-09-19; neither has a winget package):
+  - **NVIDIA** (`WindowsSetup.NvidiaDriver`, `hardware/nvidia.dsc.yaml`): NVIDIA's client lookup
+    `gfwsl.geforce.com/.../getDispDrvrByDevid/<json>` takes the PCI device ID (`dIDa: ["2520_10DE"]`),
+    `iLp` (laptop), `isCRD`/`upCRD` (Studio) and returns `DriverAttributes.Version` and
+    `DownloadURLAdmin` (the full package, with the NVIDIA App). NVIDIA version = last five digits
+    of the Windows version's last two parts (31.0.15.3713 -> 537.13); only trust it when the
+    device's driver provider is NVIDIA. The package installs with `-s -noreboot` (as
+    TinyNvidiaUpdateChecker does); no checksums, so its Authenticode signer is checked. Here it
+    went 537.13 -> 616.92 and replaced GeForce Experience with the NVIDIA App.
+  - The installer creates `ROOT\UNNAMED_DEVICE\0001` with hardware ID `ACPI\NVDA0820` (NVPCF /
+    Dynamic Boost) even though this coreboot firmware has no such ACPI device (System76 supports
+    Dynamic Boost only on 13th-gen models), so it failed with code 31. The profile disables such
+    stand-ins only when no firmware `ACPI\NVDA0820\*` device exists.
+  - **Intel** (`WindowsSetup.DriverInstaller`, gaze16 profile): no lookup API, and intel.com pages
+    return "Access Denied" to scripts, but `downloadmirror.intel.com/<id>/<file>` works; the SHA-256
+    is on the download page (read it with WebFetch). The package is a self-extractor whose
+    `installation_readme.txt` documents switches and exit codes (read it with 7-Zip, installed at
+    `C:\Program Files\7-Zip`). **The .exe returns 1000 + Installer.exe's code** (log:
+    `%ProgramData%\Intel\GFXInstaller\{Bootstrapper,Installer}\*.log`).
+  - **Installers must not inherit PowerShell 7's `PSModulePath`.** Intel's self-extractor runs
+    `powershell.exe` to hash its files; started (indirectly) from pwsh, 5.1 inherits pwsh's module
+    paths, can't find `Get-FileHash`, and shows "the file integrity check failed". (pwsh repairs
+    the variable only for processes it starts itself, so `& powershell.exe` from pwsh doesn't
+    reproduce it; go through `cmd.exe /c`.) Both resources reset it to the Machine value around
+    `Start-Process`.
+- **PowerShell class gotchas** (both broke a module's load, which dsc reports only as a
+  `FindAndParseResourceDefinitions` error): a method's local variable can't share a property's
+  name (`$gpu` vs `[string] $Gpu`), and a variable assigned only inside an inner `try` is "not
+  assigned in the method". Parse-check every module after edits:
+  `[Management.Automation.Language.Parser]::ParseFile(...)`, ignoring the `using module` errors.- **Installer logs** for packages winget installs are next to winget's own logs in
   `DiagOutputDir` (e.g. `Git.Git.<version>-<timestamp>.log`), and include the full installer
   command line. Check there first when a package fails with a generic `InstallError`.
 - **Git for Windows cancels silently if Git is in use** (a Git Bash window, etc.);

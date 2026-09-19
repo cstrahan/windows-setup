@@ -1,0 +1,33 @@
+# Machines with an NVIDIA GPU, DSC v3. Applied by configure.ps1 when configuration\hardware.psd1
+# matches.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  # The latest Game Ready driver for the GPU, from NVIDIA's driver lookup, as NVIDIA's standard
+  # package (driver, HD Audio, PhysX, NVIDIA App). Set Studio: true for the Studio branch.
+  - name: nvidiaDriver
+    type: WindowsSetup.NvidiaDriver/NvidiaDriver
+    properties:
+      IsSingleInstance: "Yes"  # quoted: YAML would otherwise read it as a boolean
+      Studio: false
+
+  # NVIDIA's installer creates a software device claiming ACPI\NVDA0820 (NVIDIA Platform
+  # Controllers and Framework, for Dynamic Boost) even when the firmware has no such ACPI device.
+  # Its driver then can't start (code 31). Disable that stand-in, but only when the firmware
+  # lacks the real device, so Dynamic Boost keeps working where it's supported.
+  - name: disableUnsupportedNvpcf
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    dependsOn:
+      - "[resourceId('WindowsSetup.NvidiaDriver/NvidiaDriver', 'nvidiaDriver')]"
+    properties:
+      getScript: 'return'
+      testScript: |
+        if (@(Get-PnpDevice -PresentOnly | Where-Object InstanceId -like 'ACPI\NVDA0820\*')) { return $true }
+        $standIns = @(Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -like 'ROOT\*' -and @($_.HardwareID) -contains 'ACPI\NVDA0820' })
+        -not @($standIns | Where-Object { (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName DEVPKEY_Device_ProblemCode).Data -ne 22 })  # 22: disabled
+      setScript: |
+        if (@(Get-PnpDevice -PresentOnly | Where-Object InstanceId -like 'ACPI\NVDA0820\*')) { return }
+        $standIns = @(Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -like 'ROOT\*' -and @($_.HardwareID) -contains 'ACPI\NVDA0820' })
+        foreach ($device in $standIns | Where-Object { (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName DEVPKEY_Device_ProblemCode).Data -ne 22 }) {
+            Disable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false
+            "disabled $($device.InstanceId): the firmware has no NVIDIA Platform Controllers (Dynamic Boost) device"
+        }

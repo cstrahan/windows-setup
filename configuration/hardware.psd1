@@ -26,5 +26,10 @@
             Version = 'gaze16-*'
             Device  = 'ACPI\ELAN0412'
         }
+        @{
+            Name    = 'NVIDIA GPU'
+            Config  = 'hardware\nvidia.dsc.yaml'
+            Device  = 'PCI\VEN_10DE&DEV_*'
+        }
     )
 }

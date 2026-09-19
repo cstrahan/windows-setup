@@ -455,6 +455,26 @@ The earlier `nvim-data` (only shada/swap from Neovim 0.10) is at `nvim-data.bak`
   conform's `fish_indent`; blink.cmp's first-run "fuzzy lib not downloaded" (it downloads on
   first start; fine afterwards).
 
+## Open threads (as of 2026-09-19)
+
+- **The user intends to use bat and eza from PowerShell** ("shortly"). Both are installed by the
+  `shell` workload; nothing uses them yet beyond fzf previews. That's a new `profile.d` snippet
+  (aliases, `$env:BAT_THEME`, an `eza`-based `ls`), not a workload change. Ask what they want
+  aliased before replacing built-ins like `ls`/`cat`.
+- **Upstream PRs are open and unreviewed:** LazyVim #7257 (find MSVC via vswhere) and lazy.nvim
+  #2185 (hererocks' `luarocks.bat` in the health check). If #7257 is merged, WinLibs gcc is no
+  longer needed for LazyVim on machines with Visual Studio; if #2185 is merged, lazy's luarocks
+  health error goes away. Branches live in `~\src\upstream\{LazyVim,lazy.nvim}` with `fork` =
+  the user's fork.
+- **The LazyVim config itself isn't managed** (see the Neovim section). The `profile.d` mechanism
+  in the `shell` workload is the obvious model for it: files in the repo, copied out, with a
+  managed-file header.
+- **Not re-checked since KB5066791:** WSL/WSLg on this machine. Routine runs still use `-SkipWsl`.
+- **Left for the user to delete:** `C:\Ruby32-x64\msys64` (865 MB), orphaned by the Ruby 3.2
+  uninstall.
+- **`tools\ConsoleHarness` now makes TUI behaviour testable** (fzf, Neovim), so verify interactive
+  changes yourself instead of asking the user to try them.
+
 ## Future directions
 
 ### Starting the bootstrap elevated (not implemented; the user chose to keep the current rule)

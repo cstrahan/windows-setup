@@ -9,8 +9,9 @@ irm https://raw.githubusercontent.com/cstrahan/windows-setup/main/install.ps1 | 
 
 Start it from a **normal (non-admin)** prompt: it installs some things as you first, then asks
 for elevation once for the rest, and refuses to run if started elevated. It's safe to re-run.
-If it says a reboot is required,
-reboot and run it again.
+The first run on a new machine needs one restart, for WSL: it tells you, you restart when you're
+ready (use **Restart**, not Shut down), and setup continues by itself after you sign in again,
+with one more UAC prompt.
 
 `install.ps1` resolves `main` to a commit, downloads that commit's zip from GitHub into
 `%LOCALAPPDATA%\windows-setup\<commit>` (reused if already there; the three most recently
@@ -38,18 +39,33 @@ From a clone, run `bootstrap.cmd` directly instead.
      - runs `configure.ps1` in PowerShell 7
 3. **`configure.ps1`** (stage 2, PowerShell 7):
    - logs a preflight line (Windows build, winget, PowerShell, free disk space), with a warning
-     if Windows is missing updates that WSLg needs
+     if Windows is missing updates that WSLg needs or hardware virtualization is off
    - applies `configuration/windows.dsc.yaml` with `dsc config set`, then any matching hardware
      profiles, then the enabled workloads, printing what each one changed; then checks that
      what they installed (`git`, `go`, `uv`, `code`, `scoop`, plus the workloads' commands) is
      on PATH
-   - enables WSL 2 (reboot required the first time), installs the distro (default
-     `Ubuntu`, the latest LTS; you create the Linux user interactively)
+   - enables WSL 2, installs the distro (default `Ubuntu`, the latest LTS; you create the Linux
+     user interactively). Installing the WSL platform needs a restart, see below
    - installs uv in the distro, and `ansible-core` plus the `ansible` collections as a uv tool
 
 Arguments to `bootstrap.cmd` pass through to `configure.ps1`: `-SkipDsc` (skip all DSC
 configurations), `-Workloads a,b` (these instead of the enabled list), `-SkipWorkloads`,
-`-SkipWsl`, `-Distro NAME`.
+`-SkipWsl`, `-Distro NAME`. (`-Resumed` is for the resume task below.)
+
+### Restarting for WSL
+
+The WSL platform (its Windows features) only becomes active after a restart. When one is needed,
+`bootstrap.ps1` registers a scheduled task, `\windows-setup\Resume after restart`, that runs the
+bootstrap again at your next sign-in, as you, 30 seconds after logon, with the same arguments plus
+`-Resumed`. It never restarts the machine itself. The resumed run asks for UAC as usual and
+removes the task. If you decline the prompt, it tries again at the following sign-in; run bootstrap
+yourself or delete the task to stop that.
+
+Only one restart is expected. If WSL still isn't active after it and no restart is pending, the
+resumed run stops and says why, usually hardware virtualization turned off in the BIOS/UEFI,
+instead of asking for another. When the Microsoft Store route fails, `wsl --update` and the
+distro install are retried with `--web-download`. (Adapted from microsoft/WindowsDeveloperConfig,
+which instead forces a restart after a 10-second warning.)
 
 ## Configuration
 
@@ -155,3 +171,13 @@ after a long delay. Windows couldn't start the WSL service. Common causes:
 - The service is hung or crashed. Before touching distros, the bootstrap runs `wsl --status`
   with a timeout. If that fails, it runs `wsl --shutdown`, force-restarts `WSLService` and
   `LxssManager`, and checks again. If WSL still doesn't respond, reboot and re-run.
+
+**"WSL still isn't active after restarting, and no restart is pending"**: the resumed run found
+the WSL platform inactive (no Hyper-V Host Compute Service, `vmcompute`) even though Windows
+has nothing left to install. Usually hardware virtualization is off: enable Intel VT-x / AMD-V
+("SVM") in the BIOS/UEFI settings, or nested virtualization for a VM, then run bootstrap again.
+If virtualization is on, WSL's package probably couldn't be downloaded; check the network.
+
+**Setup didn't resume after restarting**: check the task with
+`schtasks /query /tn "\windows-setup\Resume after restart"`. It runs at sign-in, not at boot,
+and only once you approve its UAC prompt. You can always just run bootstrap again.

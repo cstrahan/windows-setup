@@ -8,8 +8,9 @@ Applies configuration\windows.dsc.yaml with DSC v3 (dsc.exe), then any matching 
 profiles (configuration\hardware.psd1), then the enabled workloads (configuration\workloads.psd1),
 then sets up WSL 2 with uv and Ansible inside it.
 
-Every step checks current state before acting, so this is safe to re-run. Some steps (enabling
-WSL) need a restart; then it exits with 3010 and should be run again after restarting.
+Every step checks current state before acting, so this is safe to re-run. Installing the WSL
+platform needs a restart; then it exits with 3010, and bootstrap.ps1 registers a logon task that
+continues setup (with -Resumed) after the restart.
 
 .PARAMETER SkipDsc
 Don't apply the DSC configurations (base, hardware profiles, workloads).
@@ -25,6 +26,11 @@ Don't set up WSL, or uv and Ansible inside it.
 
 .PARAMETER Distro
 The WSL distribution. Defaults to Ubuntu, which tracks the latest Ubuntu LTS.
+
+.PARAMETER Resumed
+Set by the logon task bootstrap.ps1 registers when WSL needs a restart: this run follows that
+restart. If WSL still isn't active and no restart is pending, it stops with a diagnosis instead
+of asking for another restart.
 #>
 [CmdletBinding()]
 param(
@@ -32,7 +38,8 @@ param(
     [string[]] $Workloads,
     [switch] $SkipWorkloads,
     [switch] $SkipWsl,
-    [string] $Distro = 'Ubuntu'
+    [string] $Distro = 'Ubuntu',
+    [switch] $Resumed
 )
 
 $ErrorActionPreference = 'Stop'
@@ -54,6 +61,9 @@ $RebootRequiredExitCode = 3010  # same meaning as msiexec's ERROR_SUCCESS_REBOOT
 $ScancodeMapKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layout'
 $CbsRebootPendingKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
 $WslFeatures = 'Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform'
+$LxssKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss'
+$VirtualizationHelp = ('Turn on virtualization (Intel VT-x / AMD-V, sometimes "SVM") in the BIOS/UEFI settings, or, ' +
+    'in a virtual machine, expose nested virtualization to it.')
 $WslProbeTimeout = 60  # seconds; a healthy `wsl --status` returns in well under this
 # Commands the base configuration (plus bootstrap.ps1's Scoop) should leave on PATH; checked
 # afterwards, along with the applied workloads' Commands.
@@ -172,6 +182,9 @@ function Write-Preflight {
     if (-not (Test-Kernel32Export 'GetTempPath2W')) {
         Write-Step ('Warning: Windows is missing its March 2025 or later cumulative updates (kernel32 has no ' +
             'GetTempPath2W), so WSLg cannot display Linux GUI apps. Install the latest updates from Windows Update.')
+    }
+    if (-not $SkipWsl -and -not (Test-VirtualizationAvailable)) {
+        Write-Step ("Warning: hardware virtualization isn't available, so WSL 2 won't run. $VirtualizationHelp")
     }
 }
 
@@ -357,6 +370,60 @@ function Test-WslFeaturesEnabled {
     return $true
 }
 
+# The Hyper-V Host Compute Service only exists once the Virtual Machine Platform is actually
+# active, whereas the features can report "Enabled" while their install still awaits a restart.
+# (Signal from microsoft/WindowsDeveloperConfig's wsl.ps1.)
+function Test-WslPlatformActive {
+    return (Test-WslFeaturesEnabled) -and $null -ne (Get-CimInstance Win32_Service -Filter "Name='vmcompute'")
+}
+
+# Once a hypervisor is running (as with WSL 2 active), Win32_Processor reports the
+# virtualization extensions as off, so either signal counts.
+function Test-VirtualizationAvailable {
+    if ((Get-CimInstance Win32_ComputerSystem).HypervisorPresent) { return $true }
+    return [bool] @(Get-CimInstance Win32_Processor | Where-Object VirtualizationFirmwareEnabled)
+}
+
+# Installs the WSL platform (optional components plus the Store WSL package), which needs a
+# restart. After the restart bootstrap.ps1's logon task resumes with -Resumed; if the platform is
+# still inactive then with nothing pending, another restart wouldn't help, so this stops instead.
+function Install-WslPlatform([string] $Reason) {
+    if (Test-Path $CbsRebootPendingKey) {
+        # E.g. "Shut down" with Fast Startup, or signing out, instead of Restart.
+        throw [RebootRequiredException]::new("$Reason; Windows must restart to finish installing them")
+    }
+    if ($Resumed) {
+        $diagnosis = if (Test-VirtualizationAvailable) {
+            'Virtualization is available, so the likely cause is that WSL could not be downloaded; check the network and run bootstrap again.'
+        } else {
+            "Hardware virtualization isn't available. $VirtualizationHelp Then run bootstrap again."
+        }
+        throw "WSL still isn't active after restarting, and no restart is pending, so another restart won't help. $diagnosis"
+    }
+    $result = Invoke-Native wsl.exe @('--install', '--no-distribution') -AllowFailure
+    Write-Step "wsl --install --no-distribution exited with $($result.ExitCode)"
+    throw [RebootRequiredException]::new("$Reason; WSL's components were installed")
+}
+
+# The inbox wsl.exe doesn't support --version; the Store WSL package does. --web-download gets
+# the same package when the Microsoft Store route fails.
+function Update-WslPackage {
+    if ((Invoke-Native wsl.exe @('--version') -Capture -AllowFailure).ExitCode -eq 0) { return }
+    Write-Step 'Updating WSL to the current package'
+    foreach ($arguments in @(@('--update'), @('--update', '--web-download'))) {
+        Invoke-Native wsl.exe $arguments -AllowFailure | Out-Null
+        if ((Invoke-Native wsl.exe @('--version') -Capture -AllowFailure).ExitCode -eq 0) { return }
+    }
+    throw 'WSL could not be updated (wsl --update, with and without --web-download)'
+}
+
+# Skips WSL's "Welcome to WSL" window, which otherwise opens after installing a distro.
+function Set-WslWelcomeSeen {
+    $item = Get-ItemProperty -Path $LxssKey -ErrorAction SilentlyContinue
+    if ($item -and $item.PSObject.Properties['OOBEComplete'] -and $item.OOBEComplete -eq 1) { return }
+    New-Item -Path $LxssKey -Force | Out-Null
+    Set-ItemProperty -Path $LxssKey -Name OOBEComplete -Value 1 -Type DWord
+}
 function Get-WslDistros {
     $result = Invoke-Native wsl.exe @('--list', '--quiet') -Capture -AllowFailure
     if ($result.ExitCode -ne 0) {  # also non-zero when no distros are installed
@@ -419,12 +486,7 @@ function Assert-WslResponsive {
     $status = Get-WslStatus
     if ($status.Ok) { return }
     if ($status.Output -match 'WSL_E_WSL_OPTIONAL_COMPONENT_REQUIRED') {
-        # The features can report "Enabled" while their installation still awaits a restart.
-        if (Test-Path $CbsRebootPendingKey) {
-            throw [RebootRequiredException]::new('WSL components are enabled but Windows must restart to finish installing them')
-        }
-        Invoke-Native wsl.exe @('--install', '--no-distribution') -AllowFailure | Out-Null
-        throw [RebootRequiredException]::new('WSL optional components were (re)installed')
+        Install-WslPlatform 'WSL reports its optional components missing'
     }
     Write-Step 'WSL is unresponsive; restarting its services'
     Invoke-Native wsl.exe @('--shutdown') -Capture -TimeoutSeconds $WslProbeTimeout -AllowFailure | Out-Null
@@ -434,34 +496,40 @@ function Assert-WslResponsive {
     }
 }
 
+# `wsl --list` can lag behind a just-finished install.
+function Wait-WslDistro([string] $Name) {
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        if ($Name -in (Get-WslDistros)) { return $true }
+        Start-Sleep -Seconds 3
+    }
+    return $false
+}
+
 function Initialize-Wsl([string] $Name) {
     Write-Step 'Ensuring WSL 2 is installed'
-    if (-not (Test-WslFeaturesEnabled)) {
-        # Enables the optional components and installs/updates the Store WSL package.
-        $result = Invoke-Native wsl.exe @('--install', '--no-distribution') -AllowFailure
-        Write-Step "wsl --install exited with $($result.ExitCode)"
-        throw [RebootRequiredException]::new('WSL optional components were enabled')
+    if (-not (Test-WslPlatformActive)) {
+        Install-WslPlatform 'the WSL platform is not active'
     }
-    # The Store-delivered WSL supports --version; the inbox wsl.exe does not.
-    if ((Invoke-Native wsl.exe @('--version') -Capture -AllowFailure).ExitCode -ne 0) {
-        Invoke-Native wsl.exe @('--update') | Out-Null
-    }
-
+    Update-WslPackage
     Assert-WslResponsive
     Invoke-Native wsl.exe @('--set-default-version', '2') | Out-Null
 
     if ($Name -notin (Get-WslDistros)) {
+        Set-WslWelcomeSeen
         Write-Step "Installing $Name. Create your Linux user when prompted; if you land in a Linux shell afterwards, type ``exit`` to continue."
-        Invoke-Native wsl.exe @('--install', '--distribution', $Name) | Out-Null
-        if ($Name -notin (Get-WslDistros)) {
-            throw "$Name is still not registered with WSL"
+        Invoke-Native wsl.exe @('--install', '--distribution', $Name) -AllowFailure | Out-Null
+        if (-not (Wait-WslDistro $Name)) {
+            Write-Step "$Name didn't install from the Microsoft Store; downloading it from the web instead"
+            Invoke-Native wsl.exe @('--install', '--distribution', $Name, '--web-download') -AllowFailure | Out-Null
+            if (-not (Wait-WslDistro $Name)) {
+                throw "$Name is still not registered with WSL"
+            }
         }
     }
     if ((Get-WslDistroVersion $Name) -ne 2) {
         Invoke-Native wsl.exe @('--set-version', $Name, '2') | Out-Null
     }
 }
-
 function Install-WslAnsible([string] $Name) {
     Write-Step "Ensuring uv and Ansible are installed in $Name"
     $script = @"

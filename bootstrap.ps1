@@ -3,7 +3,8 @@
 # - unelevated: per-user installs that should belong to the user (Scoop)
 # - elevated (it relaunches itself with UAC): make sure winget works and is current, install or
 #   update DSC v3 and PowerShell 7, then hand off to configure.ps1 (stage 2) in PowerShell 7.
-# Safe to re-run; every step checks before acting.
+# Safe to re-run; every step checks before acting. When WSL needs a restart (configure.ps1 exits
+# 3010), it registers a logon task that runs it again afterwards, with -Resumed.
 #
 # Any arguments are passed through to configure.ps1 (e.g. -SkipWsl, -Distro Debian).
 
@@ -17,8 +18,14 @@ $Pwsh = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
 $VCRedistKey = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'
 # Scoop apps to install for the user, in the unelevated section.
 $ScoopApps = @('mise', 'neovim')
+# When WSL needs a restart, this logon task runs the bootstrap again afterwards (see
+# Register-ResumeTask). Same folder as the time resync task.
+$ResumeTaskPath = '\windows-setup\'
+$ResumeTaskName = 'Resume after restart'
 $relaunched = $args -contains '--elevated-relaunch'
 $passthru = @($args | Where-Object { $_ -ne '--elevated-relaunch' })
+# Passed through to configure.ps1 too, which then won't ask for a second restart.
+$resumed = $passthru -contains '-Resumed'
 
 function Test-Admin {
     $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -214,6 +221,41 @@ function Install-ScoopApps {
     }
 }
 
+# Registers a one-shot logon task that re-runs this bootstrap after the restart WSL needs, with
+# the same arguments plus -Resumed. It runs as the user at normal privilege, as the bootstrap
+# must start, and asks for elevation itself, so the user approves a fresh UAC prompt. The
+# elevated section removes the task; if the user declines UAC it stays and tries again at the
+# next sign-in. (From microsoft/WindowsDeveloperConfig's _reboot-resume.ps1, minus its forced
+# restart: the user restarts when ready.)
+function Register-ResumeTask {
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name  # DOMAIN\user, as logon triggers need
+    $arguments = @($passthru | Where-Object { $_ -ne '-Resumed' }) + '-Resumed'
+    # cmd /s /c strips only the outer quotes, leaving the quoted path and arguments intact.
+    $commandLine = '/s /c ""{0}" {1}"' -f (Join-Path $PSScriptRoot 'bootstrap.cmd'),
+        (($arguments | ForEach-Object { "`"$_`"" }) -join ' ')
+    $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\cmd.exe') -Argument $commandLine -WorkingDirectory $PSScriptRoot
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+    $trigger.Delay = 'PT30S'  # let the desktop and network come up first
+    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+    # No time limit: the resumed run includes the interactive distro install.
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+    Register-ScheduledTask -TaskPath $ResumeTaskPath -TaskName $ResumeTaskName -Action $action -Trigger $trigger `
+        -Principal $principal -Settings $settings -Force `
+        -Description 'Continues windows-setup after the restart WSL needs. Removed when setup resumes.' | Out-Null
+}
+
+function Unregister-ResumeTask {
+    if (Get-ScheduledTask -TaskPath $ResumeTaskPath -TaskName $ResumeTaskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskPath $ResumeTaskPath -TaskName $ResumeTaskName -Confirm:$false
+        Write-Host '==> Removed the resume-after-restart task'
+    }
+}
+
+# Resumed runs start in a window of their own that closes on exit; keep it open to show why.
+function Wait-IfResumed {
+    if ($resumed -and -not [Console]::IsOutputRedirected) { Read-Host 'Press Enter to close' | Out-Null }
+}
+
 # Unelevated section: per-user things that should be installed as the user, not as admin.
 function Invoke-UnelevatedSection {
     Install-Scoop
@@ -225,6 +267,7 @@ function Invoke-UnelevatedSection {
 # console.)
 function Invoke-ElevatedSection {
     Set-Utf8Console
+    Unregister-ResumeTask
     Initialize-Winget
     Update-Winget
     Initialize-VCRedist
@@ -250,16 +293,28 @@ if (-not $relaunched) {
             'turn UAC on to use this.)') -ForegroundColor Red
         exit 1
     }
+    if ($resumed) { Write-Host '==> Resuming windows-setup after the restart' }
     try {
         Invoke-UnelevatedSection
     } catch {
         Write-Host "bootstrap failed: $_" -ForegroundColor Red
+        Wait-IfResumed
         exit 1
     }
     Write-Host '==> Requesting elevation...'
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '--elevated-relaunch') +
         @($passthru | ForEach-Object { "`"$_`"" })
-    $proc = Start-Process powershell.exe -Verb RunAs -ArgumentList $argList -Wait -PassThru
+    try {
+        $proc = Start-Process powershell.exe -Verb RunAs -ArgumentList $argList -Wait -PassThru
+    } catch {
+        # Typically the UAC prompt was declined.
+        Write-Host "bootstrap couldn't elevate: $($_.Exception.Message)" -ForegroundColor Red
+        if ($resumed) {
+            Write-Host 'Setup will try again at your next sign-in, or run bootstrap again yourself.' -ForegroundColor Yellow
+        }
+        Wait-IfResumed
+        exit 1
+    }
     exit $proc.ExitCode
 }
 
@@ -271,7 +326,14 @@ try {
     Invoke-ElevatedSection
     if ($exitCode -eq $RebootRequiredExitCode) {
         # "Shut down" with Fast Startup enabled doesn't finish pending component installs.
-        Write-Host 'A reboot is required. Use Restart (not Shut down), then run bootstrap again to continue.' -ForegroundColor Yellow
+        try {
+            Register-ResumeTask
+            Write-Host ('A restart is required. Save your work and use Restart (not Shut down) when you''re ready: ' +
+                'setup continues by itself after you sign in again, with one more UAC prompt.') -ForegroundColor Yellow
+        } catch {
+            Write-Host "Couldn't register the task that resumes setup after restarting: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host 'A restart is required. Use Restart (not Shut down), then run bootstrap again to continue.' -ForegroundColor Yellow
+        }
     }
 } catch {
     Write-Host "bootstrap failed: $_" -ForegroundColor Red

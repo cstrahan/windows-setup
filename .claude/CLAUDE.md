@@ -39,7 +39,12 @@ See README.md for what the project does. These notes cover testing it from a Cla
   elevated window then waits for the user's Enter. Don't use the default cache from here: `%LOCALAPPDATA%` is virtualized for
   Claude's processes, and winget (outside the sandbox) wouldn't see the files. It fetches
   what's on GitHub, so local changes need pushing first.
-- Exit code `3010` means "restart, then re-run". Every step must stay idempotent.
+- Exit code `3010` means "restart, then re-run". Every step must stay idempotent. On 3010
+  (only the WSL platform install raises it) `bootstrap.ps1` registers the logon task
+  `\windows-setup\Resume after restart` (`Register-ResumeTask`: runs `bootstrap.cmd <args>
+  -Resumed` as the user, Limited, 30 s after logon); the elevated section removes it. With
+  `-Resumed`, `configure.ps1`'s `Install-WslPlatform` refuses a second restart unless one is
+  actually pending (CBS `RebootPending`) and diagnoses virtualization instead.
 
 ## Testing from the Claude desktop app
 
@@ -230,6 +235,19 @@ Gotchas:
   `AllowStartIfOnBatteries`/`DontStopIfGoingOnBatteries` for anything a laptop needs.
 - **PowerShell hashtable member access can hit methods:** `$h.Clear` is `Hashtable.Clear()`, not
   the `Clear` key. Use `$h['Key']` for keys that might collide with members.
+- **Testing the WSL restart/resume flow** without breaking this machine's WSL (tested
+  2026-09-19):
+  - The logic: dot-source `configure.ps1` in `pwsh` and override `Test-WslPlatformActive`,
+    `Test-VirtualizationAvailable` and `Invoke-Native` (it uses `Process.Start`, so a
+    `function wsl.exe` fake isn't enough), set `$Resumed`, and point `$CbsRebootPendingKey` /
+    `$LxssKey` at scratch `HKCU:` keys.
+  - The task: dot-source `bootstrap.ps1` in Windows PowerShell, set `$passthru = @('-SkipWsl',
+    '-SkipWorkloads')`, call `Register-ResumeTask` (works unelevated), inspect it with `schtasks
+    /query /tn "\windows-setup\Resume after restart" /xml`, then `Start-ScheduledTask` it. That
+    runs what the logon trigger would: a visible window, a UAC prompt, and an elevated window
+    waiting for Enter (tell the user). The task disappearing shows the elevated section ran.
+  - Real signals here: `vmcompute` exists; `Win32_Processor.VirtualizationFirmwareEnabled` is
+    False because a hypervisor is running, so `HypervisorPresent` is checked first.
 - **Probing dsc without UAC:** write a throwaway config under `logs/` with a
   `Microsoft.DSC.Transitional/PowerShellScript` resource whose scripts write diagnostics, and run
   `dsc config set --file logs\x.dsc.yaml --output-format json` directly from your shell.

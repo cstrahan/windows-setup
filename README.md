@@ -7,7 +7,9 @@ logging in as your user. No clone needed; in Windows PowerShell:
 irm https://raw.githubusercontent.com/cstrahan/windows-setup/main/install.ps1 | iex
 ```
 
-It asks for elevation once and is safe to re-run. If it says a reboot is required,
+Start it from a **normal (non-admin)** prompt: it installs some things as you first, then asks
+for elevation once for the rest, and refuses to run if started elevated. It's safe to re-run.
+If it says a reboot is required,
 reboot and run it again.
 
 `install.ps1` resolves `main` to a commit, downloads that commit's zip from GitHub into
@@ -25,10 +27,12 @@ From a clone, run `bootstrap.cmd` directly instead.
 
 1. **`bootstrap.cmd`** runs `bootstrap.ps1`, bypassing the execution policy.
 2. **`bootstrap.ps1`** (stage 1, in Windows PowerShell 5.1, which is all a fresh install has):
-   - elevates
-   - registers winget if needed, and upgrades it
-   - installs or upgrades PowerShell 7 (the MSI, via winget)
-   - runs `configure.ps1` in PowerShell 7
+   - unelevated section: installs [Scoop](https://scoop.sh) for the current user, so it's owned by
+     you rather than Administrators
+   - relaunches itself elevated (one UAC prompt) for the elevated section:
+     - registers winget if needed, and upgrades it
+     - installs or upgrades PowerShell 7 (the MSI, via winget)
+     - runs `configure.ps1` in PowerShell 7
 3. **`configure.ps1`** (stage 2, PowerShell 7):
    - applies `configuration/windows.dsc.yaml` with `winget configure`, then any matching
      hardware profiles
@@ -65,6 +69,8 @@ Currently configured:
 - Keyboard repeat (current user): shortest repeat delay, fastest repeat rate. Applied immediately.
 - Caps Lock acts as an extra Left Ctrl, on every keyboard. It takes effect after a restart:
   Windows' remapping (`Scancode Map`) applies to all keyboards and is read at boot.
+- Windows PowerShell's execution policy is `RemoteSigned` for the current user, so local
+  scripts like Scoop's `scoop.ps1` shim can run. (PowerShell 7 already defaults to it.)
 - uv, Visual Studio Code and Windows Terminal installed.
 - Go, latest stable release (at least 1.27.1), from go.dev's official MSI (checksum-verified).
 - Git for Windows, latest version, with pinned installer choices: Explorer integration, editor,

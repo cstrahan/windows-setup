@@ -180,6 +180,24 @@ properties:
         Ensure: Present
         Force: true
 
+    # Windows PowerShell's default policy (Restricted) blocks local scripts, including Scoop's
+    # `scoop.ps1` shim. RemoteSigned for the current user is what Scoop asks for. This is the
+    # value `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` writes. (PowerShell 7 already
+    # defaults to RemoteSigned. Scoop itself is installed by bootstrap.ps1, since its installer
+    # runs unelevated.)
+    - resource: PSDscResources/Registry
+      id: windowsPowerShellExecutionPolicy
+      directives:
+        description: 'Windows PowerShell: RemoteSigned execution policy for the current user'
+        allowPrerelease: false
+      settings:
+        Key: HKEY_CURRENT_USER\Software\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell
+        ValueName: ExecutionPolicy
+        ValueType: String
+        ValueData: RemoteSigned
+        Ensure: Present
+        Force: true
+
     # uv, the Python package and project manager. (PowerShell 7 isn't here: bootstrap.ps1
     # installs and updates it, since configure.ps1 runs in it.)
     - resource: Microsoft.WinGet.DSC/WinGetPackage

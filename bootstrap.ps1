@@ -1,6 +1,9 @@
-# Stage 1 bootstrap, in Windows PowerShell 5.1 (all a fresh Windows 10 has): elevate, make sure
-# winget works and is current, install or update PowerShell 7, then hand off to configure.ps1
-# (stage 2) in PowerShell 7. Safe to re-run; every step checks before acting.
+# Stage 1 bootstrap, in Windows PowerShell 5.1 (all a fresh Windows 10 has). Start it
+# unelevated; it refuses to run otherwise. Two sections:
+# - unelevated: per-user installs that should belong to the user (Scoop)
+# - elevated (it relaunches itself with UAC): make sure winget works and is current, install or
+#   update PowerShell 7, then hand off to configure.ps1 (stage 2) in PowerShell 7.
+# Safe to re-run; every step checks before acting.
 #
 # Any arguments are passed through to configure.ps1 (e.g. -SkipWsl, -Distro Debian).
 
@@ -90,7 +93,65 @@ function Initialize-PowerShell {
     Write-Host "==> PowerShell $(& $Pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()')"
 }
 
-if (-not (Test-Admin)) {
+# Scoop installs per user (to ~\scoop, or $env:SCOOP) and should be owned by the user, so it's
+# installed in the unelevated section. The installer runs as a separate `powershell -File`, so
+# its `exit` on failure ends only itself, with a meaningful exit code.
+function Install-Scoop {
+    $scoopDir = if ($env:SCOOP) { $env:SCOOP } else { Join-Path $env:USERPROFILE 'scoop' }
+    $shim = Join-Path $scoopDir 'shims\scoop.ps1'
+    # The installer's own test is whether a `scoop` command exists; if so it declines (with exit
+    # code 0), so treat that as installed too.
+    if ((Test-Path $shim) -or (Get-Command scoop -ErrorAction SilentlyContinue)) { return }
+
+    Write-Host '==> Installing Scoop'
+    $installer = Join-Path $env:TEMP "install-scoop-$PID.ps1"
+    Invoke-WebRequest -UseBasicParsing -Uri 'https://get.scoop.sh' -OutFile $installer
+    try {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
+        $code = $LASTEXITCODE
+    } finally {
+        Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+    }
+    if ($code -ne 0 -or -not (Test-Path $shim)) {
+        throw "Scoop's installer failed (exit code $code)"
+    }
+}
+
+# Unelevated section: per-user things that should be installed as the user, not as admin.
+function Invoke-UnelevatedSection {
+    Install-Scoop
+}
+
+# Elevated section: everything else. Sets $script:exitCode to configure.ps1's exit code.
+# (Not a return value: that would also capture all the programs' output, which must reach the
+# console.)
+function Invoke-ElevatedSection {
+    Initialize-Winget
+    Update-Winget
+    Initialize-PowerShell
+
+    Write-Host '==> Handing off to configure.ps1'
+    & $Pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'configure.ps1') @passthru
+    $script:exitCode = $LASTEXITCODE
+}
+
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+if (-not $relaunched) {
+    # The contract: the bootstrap is started unelevated, runs the unelevated section, then
+    # relaunches itself elevated for the rest.
+    if (Test-Admin) {
+        Write-Host ('bootstrap must be started from a normal (non-elevated) prompt: it installs some things ' +
+            'as you, then asks for elevation itself. (With UAC turned off, every prompt is elevated; ' +
+            'turn UAC on to use this.)') -ForegroundColor Red
+        exit 1
+    }
+    try {
+        Invoke-UnelevatedSection
+    } catch {
+        Write-Host "bootstrap failed: $_" -ForegroundColor Red
+        exit 1
+    }
     Write-Host '==> Requesting elevation...'
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '--elevated-relaunch') +
         @($passthru | ForEach-Object { "`"$_`"" })
@@ -100,14 +161,10 @@ if (-not (Test-Admin)) {
 
 $exitCode = 1
 try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    Initialize-Winget
-    Update-Winget
-    Initialize-PowerShell
-
-    Write-Host '==> Handing off to configure.ps1'
-    & $Pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'configure.ps1') @passthru
-    $exitCode = $LASTEXITCODE
+    if (-not (Test-Admin)) {
+        throw '--elevated-relaunch is for the bootstrap''s own elevated relaunch; run bootstrap without it'
+    }
+    Invoke-ElevatedSection
     if ($exitCode -eq $RebootRequiredExitCode) {
         # "Shut down" with Fast Startup enabled doesn't finish pending component installs.
         Write-Host 'A reboot is required. Use Restart (not Shut down), then run bootstrap again to continue.' -ForegroundColor Yellow
@@ -115,7 +172,8 @@ try {
 } catch {
     Write-Host "bootstrap failed: $_" -ForegroundColor Red
 } finally {
-    # The elevated window closes on exit; keep it open so the output can be read.
-    if ($relaunched) { Read-Host 'Press Enter to close' | Out-Null }
+    # The elevated window closes on exit; keep it open so the output can be read (unless the
+    # output is going to a file, as when testing).
+    if (-not [Console]::IsOutputRedirected) { Read-Host 'Press Enter to close' | Out-Null }
 }
 exit $exitCode

@@ -1,0 +1,53 @@
+# System76 Gazelle (gaze16, Tiger Lake-H) drivers, DSC v3. Applied by configure.ps1 when
+# configuration\hardware.psd1 matches.
+#
+# System76's Windows driver repo (https://github.com/system76/windows-drivers) says Windows Update
+# covers most of this laptop's drivers, but lists the first two; the HID Event Filter is from its gaze17 list. Each is installed INF by INF with
+# pnputil, not with Intel's setup program, and only where a device's current driver is older.
+# The zips are pinned to the commit that added them, and to their SHA-256. They're Git LFS files:
+# raw.githubusercontent.com serves only the LFS pointer, media.githubusercontent.com the content.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  # Intel Chipset Device Software 10.1.18698.8258: INF-only; names the PCH's devices (LPC, PCIe
+  # root ports, SMBus, SPI flash, shared SRAM, ...). Its Tiger Lake PCH-H INFs are 10.1.34.8.
+  - name: intelChipset
+    type: WindowsSetup.DriverPackage/DriverPackage
+    properties:
+      Name: Intel chipset (Tiger Lake PCH-H)
+      Uri: https://media.githubusercontent.com/media/system76/windows-drivers/5309ec101bc039fa6cec79342d512fc85b5eca94/drivers/chipset-10.1.18698.8258-public-mup.zip
+      Sha256: 5890A51FA1DAEC4255342EF86DD829C2F7793197D99EC455F2ED289A355B9CCD
+      Infs:
+        - DriverFiles\production\Windows10-x64\TigerLakePCH-HSystem.inf
+        - DriverFiles\production\Windows10-x64\TigerLakePCH-HSystemISH.inf
+        - DriverFiles\production\Windows10-x64\TigerLakePCH-HSystemLPSS.inf
+        - DriverFiles\production\Windows10-x64\TigerLakePCH-HSystemNorthpeak.inf
+        - DriverFiles\production\Windows10-x64\TigerLakePCH-HSystemThermal.inf
+
+  # Intel Serial IO 30.100.2104.1: the I2C controllers (the touchpad is an I2C HID device),
+  # UART, GPIO and SPI. After the chipset package, whose INF also lists these devices.
+  - name: intelSerialIO
+    type: WindowsSetup.DriverPackage/DriverPackage
+    dependsOn:
+      - "[resourceId('WindowsSetup.DriverPackage/DriverPackage', 'intelChipset')]"
+    properties:
+      Name: Intel Serial IO (Tiger Lake PCH)
+      Uri: https://media.githubusercontent.com/media/system76/windows-drivers/5309ec101bc039fa6cec79342d512fc85b5eca94/drivers/serialio_30.100.2104.1_pv_tgl_pch_20h2v2.zip
+      Sha256: 1D8B3470E02852D2F1461070A66D7A2FFEE2990D35FE6FEC725E2377AB1692E9
+      Infs:
+        - SerialIO_30.100.2104.1_PV_TGL_PCH_20H2v2\production\Windows10-x64\0\Drivers\WU\iaLPSS2_GPIO2_TGL.inf
+        - SerialIO_30.100.2104.1_PV_TGL_PCH_20H2v2\production\Windows10-x64\0\Drivers\WU\iaLPSS2_I2C_TGL.inf
+        - SerialIO_30.100.2104.1_PV_TGL_PCH_20H2v2\production\Windows10-x64\0\Drivers\WU\iaLPSS2_SPI_TGL.inf
+        - SerialIO_30.100.2104.1_PV_TGL_PCH_20H2v2\production\Windows10-x64\0\Drivers\WU\iaLPSS2_UART2_TGL.inf
+
+  # Intel HID Event Filter 2.2.1.386 (ACPI\INT33D5): the firmware's "virtual buttons" (e.g. power
+  # button and airplane-mode events) reach Windows through it; without it the device has no
+  # driver (code 28). System76 added this zip for the gaze17, but its INF lists INT33D5 for
+  # Windows 10 1803+ explicitly. Windows Update's optional alternative is 1.1.1.318 (2016).
+  - name: intelHidEventFilter
+    type: WindowsSetup.DriverPackage/DriverPackage
+    properties:
+      Name: Intel HID Event Filter
+      Uri: https://media.githubusercontent.com/media/system76/windows-drivers/65c531f4c63036e64273515cf09a6a2509bd6c05/drivers/hideventfilterdriver-2.2.1.386_rs5_19h1_20h1_21h2_certified.zip
+      Sha256: 040E5698E05BEF4A72769DC3B8168FE5EE804289FDC8C4809BE1D80810DE88F0
+      Infs:
+        - drivers\x64\HidEventFilter.inf

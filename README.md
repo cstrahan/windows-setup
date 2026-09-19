@@ -73,7 +73,7 @@ The configurations are [DSC v3](https://learn.microsoft.com/powershell/dsc/overv
 Most resources are DSC's and winget's built-in ones (`Microsoft.Windows/Registry`,
 `Microsoft.Windows/Service`, `Microsoft.WinGet/Package`, `Microsoft.DSC.Transitional/PowerShellScript`).
 Where those fall short, this repo has its own class-based PowerShell resources in `dsc/`, one
-module each: `WindowsSetup.WindowsCapability`, `.ScheduledTask`, `.GitForWindows`, `.GoLang`,
+module each: `WindowsSetup.WindowsCapability`, `.ScheduledTask`, `.DriverPackage`, `.GitForWindows`, `.GoLang`,
 `.KeyboardRepeat`, `.PrecisionTouchpad`, `.VisualStudioComponents` (plus `WindowsSetup.Common`,
 shared code). DSC finds them through `PSModulePath`, which `configure.ps1` sets. To check for
 drift without changing anything, in an elevated PowerShell 7 at the repo root:
@@ -142,6 +142,14 @@ hardware. Profiles match on the machine's vendor, model and version, and optiona
 present device's hardware ID. After `windows.dsc.yaml`, `configure.ps1` applies every profile
 that matches, and logs the ones it skips. Currently:
 
+- **System76 Gazelle (gaze16)**: the two drivers System76 lists for it in
+  [system76/windows-drivers](https://github.com/system76/windows-drivers), Intel's chipset INFs
+  (10.1.34.8 for the Tiger Lake PCH-H) and Serial IO (30.100.2104.1: I2C, UART, GPIO, SPI), plus
+  the Intel HID Event Filter 2.2.1.386 from its gaze17 list (without it the `INT33D5` device has
+  no driver; Windows Update only offers a 2016 build). Windows Update doesn't install these. `WindowsSetup.DriverPackage` downloads each zip (pinned to
+  a commit and a SHA-256, cached in `%ProgramData%\windows-setup\drivers`) and installs its INFs
+  with `pnputil`, only where a device's driver is older, so a newer driver from Windows Update
+  stays.
 - **System76 Gazelle (gaze16) with the ELAN0412 touchpad**: turns off touchpad tapping
   (tap to click, two-finger tap to right-click, tap-and-drag), since the touchpad has
   dedicated buttons.

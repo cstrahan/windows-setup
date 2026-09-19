@@ -1,5 +1,5 @@
-# Hardware profiles: extra winget configurations that configure.ps1 applies, after
-# windows.dsc.yaml, on machines that match.
+# Hardware profiles: extra DSC configurations that configure.ps1 applies, after
+# windows.dsc.yaml, on machines that match (every matching profile, in this order).
 #
 # Each profile has a Name, a Config file (relative to this directory), an optional Note printed
 # when it applies, and match criteria. All criteria given must match; values are
@@ -12,6 +12,12 @@
 #   Get-PnpDevice -PresentOnly | Select-Object FriendlyName, HardwareID
 @{
     Profiles = @(
+        @{
+            Name    = 'System76 Gazelle (gaze16) drivers'
+            Config  = 'hardware\system76-gaze16-drivers.dsc.yaml'
+            Vendor  = 'System76'
+            Version = 'gaze16-*'
+        }
         @{
             Name    = 'System76 Gazelle (gaze16) with ELAN0412 touchpad'
             Config  = 'hardware\system76-gaze16.dsc.yaml'

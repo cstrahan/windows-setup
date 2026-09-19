@@ -195,7 +195,32 @@ Gotchas:
     packages, and `Error 0x80070005: Could not sync DCAT registration` (a TrustedInstaller-owned
     Windows Update key; only affects VS updates via Windows Update).
   - Adding the C++ workload returned 3010 (restart to finish); the resource warns.
-- **Installer logs** for packages winget installs are next to winget's own logs in
+- **Drivers (`WindowsSetup.DriverPackage`, gaze16 profile).** Findings from 2026-09-19:
+  - System76's chipset and Serial IO drivers were already on this laptop, but they had been
+    installed by hand with Intel's installers (`setupapi.dev.log` shows `%TEMP%` source paths
+    via DifX), not by Windows Update. Check with `pnputil /enum-drivers`, `Win32_PnPSignedDriver`,
+    and `Select-String` in `C:\Windows\INF\setupapi.dev*.log`.
+  - The package version isn't the driver version: chipset "10.1.18698.8258" ships
+    `TigerLakePCH-HSystem.inf` 10.1.34.8 (dated 1968 so it never outranks a real driver).
+  - Intel's INFs mostly list bare `PCI\VEN_x&DEV_y` IDs, which are devices' *compatible* IDs,
+    so match on HardwareID + CompatibleID.
+  - **system76/windows-drivers stores zips in Git LFS.** `raw.githubusercontent.com/<commit>/...`
+    returns the 132-byte pointer; use `media.githubusercontent.com/media/<owner>/<repo>/<commit>/<path>`.
+    (`github.com/<owner>/<repo>/raw/master/...` also redirects to the content, but isn't pinned.)
+  - Test: `dsc config test`/`get` works unelevated (`get` lists `OutdatedDevices`); the cache is
+    `%ProgramData%\windows-setup\drivers\<sha256>`. The `pnputil /add-driver /install` path ran
+    for real once (the HID Event Filter, 2026-09-19): the device came up OK at once, no restart.
+  - **`Win32_PnPSignedDriver` goes stale:** right after that install it still listed the device
+    with a blank version, while `DEVPKEY_Device_DriverVersion` (`Get-PnpDeviceProperty`) was
+    already right. The resource reads the device property.
+  - `ACPI\INT33D5` (Intel HID Event Filter) had no driver. Windows Update offered 1.1.1.318
+    (2016) as an optional update; the profile installs System76's 2.2.1.386 (added for the gaze17;
+    its INF lists INT33D5 for Windows 10 1803+). Pending WU drivers, with hardware IDs, come from
+    `Microsoft.Update.Session` → `CreateUpdateSearcher().Search("IsInstalled=0 and Type='Driver'")`
+    (works unelevated).
+  - Still without drivers, deliberately: `ACPI\INTC1026` (the SCU/PMC IPC interface, per Linux's
+    `intel_scu_pltdrv`; no Windows driver offered), `ACPI\17761776` (System76 ACPI),
+    `ACPI\BOOT0000` (coreboot tables).- **Installer logs** for packages winget installs are next to winget's own logs in
   `DiagOutputDir` (e.g. `Git.Git.<version>-<timestamp>.log`), and include the full installer
   command line. Check there first when a package fails with a generic `InstallError`.
 - **Git for Windows cancels silently if Git is in use** (a Git Bash window, etc.);

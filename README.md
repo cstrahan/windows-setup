@@ -153,8 +153,10 @@ loader block is replaced in place when it changes, so the rest of your profile s
 | Snippet | What it does |
 |---|---|
 | `00-mise.ps1` | [mise](https://mise.jdx.dev) activation (PATH and per-directory tool versions), first so later snippets see its tools. PowerShell 7 only; 5.1 uses mise's shims. |
-| `10-fzf.ps1` | Points fzf at `fd` (or ripgrep) and sets default options. |
-| `20-psfzf.ps1` | PSFzf's Ctrl+T and Ctrl+R bindings, with `-EnableFd`. PowerShell 7 with an interactive host only. |
+| `10-fzf.ps1` | Points fzf at `fd` (or ripgrep), and sets the layout plus preview-pane keys (Ctrl+U/D, Ctrl+B/F, Ctrl+G/H, Alt+W, Ctrl+E). Setting `FZF_DEFAULT_OPTS` yourself overrides all of it. |
+| `20-psfzf.ps1` | PSFzf's Ctrl+T (paths) and Ctrl+R (history) bindings, with `-EnableFd`. PowerShell 7 with an interactive host only. |
+| `30-aliases.ps1` | Aliases; `vi` runs `nvim`. |
+| `40-fzf-functions.ps1` | `fdg` (Ctrl+F) picks a file, Ctrl+S inside it switches to directories, previewing with `bat` or an `eza` tree. `rgg` (Ctrl+G) searches contents with ripgrep, Ctrl+S switches between ripgrep and fzf matching. Either way you then pick what to do with the result (nvim at the matched line, bat, cd, copy the path, reveal, remove). |
 
 ### Hardware profiles
 

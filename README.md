@@ -28,7 +28,8 @@ From a clone, run `bootstrap.cmd` directly instead.
 1. **`bootstrap.cmd`** runs `bootstrap.ps1`, bypassing the execution policy.
 2. **`bootstrap.ps1`** (stage 1, in Windows PowerShell 5.1, which is all a fresh install has):
    - unelevated section: installs [Scoop](https://scoop.sh) for the current user, so it's owned by
-     you rather than Administrators
+     you rather than Administrators, then the Scoop apps listed in `$ScoopApps` (currently
+     [mise](https://mise.jdx.dev)) if they aren't installed yet
    - relaunches itself elevated (one UAC prompt) for the elevated section:
      - registers winget if needed, and upgrades it
      - makes sure `winget configure` works: it stops with an explanation if Group Policy

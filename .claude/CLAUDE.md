@@ -107,6 +107,11 @@ Gotchas:
 - **PowerShell 7 must be the MSI.** winget's `Microsoft.PowerShell` defaults to the MSIX build
   (per-user, sandboxed, only a `WindowsApps\pwsh.exe` alias), so bootstrap passes
   `--installer-type wix --scope machine`.
+- **Scoop's installer persists a custom location.** Run with `-ScoopDir`, it writes `root_path`
+  to the user's real `~\.config\scoop\config.json`. After a test install into a scratch dir
+  (2026-09-18), the user's real Scoop kept looking there until the key was removed. If a test
+  installs Scoop somewhere else, also back up and restore that file, not just `PATH` and the
+  `SCOOP` variable. Check with `scoop config root_path` (unset = default `~\scoop`).
 - **Faking failures for tests:** `bootstrap.ps1` and `configure.ps1` can both be dot-sourced to
   just define their functions. Their paths are script variables, so point `$ConfigurePolicyKey` /
   `$VCRedistKey` at a scratch key under `HKCU:` (and remove it afterwards). In PowerShell a

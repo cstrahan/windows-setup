@@ -16,6 +16,8 @@ $MinWingetVersion = [version] '1.6'  # `winget configure` went GA in 1.6
 $Pwsh = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
 $VCRedistKey = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'
 $ConfigurePolicyKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller'
+# Scoop apps to install for the user, in the unelevated section.
+$ScoopApps = @('mise', 'neovim')
 $relaunched = $args -contains '--elevated-relaunch'
 $passthru = @($args | Where-Object { $_ -ne '--elevated-relaunch' })
 
@@ -206,9 +208,25 @@ function Install-Scoop {
     }
 }
 
+# Installs Scoop apps that aren't installed yet (it doesn't update installed ones). Runs Scoop as
+# a separate `powershell -File` on its shim: right after Scoop's own install it isn't on this
+# process's PATH yet, and scoop.ps1 can call `exit`.
+function Install-ScoopApps {
+    $scoopDir = if ($env:SCOOP) { $env:SCOOP } else { Join-Path $env:USERPROFILE 'scoop' }
+    foreach ($app in $ScoopApps) {
+        if (Test-Path (Join-Path $scoopDir "apps\$app\current")) { continue }
+        Write-Host "==> scoop install $app"
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scoopDir 'shims\scoop.ps1') install $app
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $scoopDir "apps\$app\current"))) {
+            throw "scoop install $app failed (exit code $LASTEXITCODE)"
+        }
+    }
+}
+
 # Unelevated section: per-user things that should be installed as the user, not as admin.
 function Invoke-UnelevatedSection {
     Install-Scoop
+    Install-ScoopApps
 }
 
 # Elevated section: everything else. Sets $script:exitCode to configure.ps1's exit code.

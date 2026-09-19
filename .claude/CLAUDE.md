@@ -5,10 +5,14 @@ See README.md for what the project does. These notes cover testing it from a Cla
 ## Layout
 
 - `bootstrap.cmd` → `bootstrap.ps1` (stage 1, Windows PowerShell 5.1): self-elevates, registers
-  winget, installs uv, then `uv run --script configure.py`.
-- `configure.py` (stage 2, PEP 723 script, stdlib only): applies `configuration/windows.dsc.yaml`
-  with `winget configure --module-path <repo>\dsc` (must be an absolute path), then sets up
-  WSL 2, the distro, and uv + Ansible inside it.
+  and upgrades winget, installs/upgrades PowerShell 7 (the MSI), then runs `configure.ps1` with
+  `C:\Program Files\PowerShell\7\pwsh.exe` (full path: PATH isn't refreshed in that session).
+- `configure.ps1` (stage 2, PowerShell 7): applies `configuration/windows.dsc.yaml` with
+  `winget configure --module-path <repo>\dsc` (must be an absolute path), then matching
+  hardware profiles (`configuration/hardware.psd1`), then sets up WSL 2, the distro, and
+  uv + Ansible inside it. Programs are run through `Invoke-Native` (console passthrough or
+  `-Capture`, `-InputText`, `-TimeoutSeconds`). Dot-sourcing it (`. .\configure.ps1`) only
+  defines the functions, so they can be tested directly in `pwsh` without admin.
 - `dsc/WindowsSetupDsc/`: our own class-based DSC resources, for gaps in the Gallery modules.
   One `<Resource>.psm1` per resource, listed in the manifest's `NestedModules` and
   `DscResourcesToExport`; shared code (the `Ensure` enum, `SystemParametersInfoW` interop) is in
@@ -27,8 +31,8 @@ so redirect it to a file through `cmd.exe` and read the file afterwards:
 ```powershell
 Set-Location C:\Users\cstrahan\src\windows-setup
 New-Item -ItemType Directory -Force logs | Out-Null
-$t = "$PWD\.test-uv"; $log = "$PWD\logs\run.log"
-$cmdline = "`"set `"UV_PYTHON_INSTALL_DIR=$t\python`" && set `"UV_CACHE_DIR=$t\cache`" && $PWD\bootstrap.cmd > `"$log`" 2>&1`""
+$log = "$PWD\logs\run.log"
+$cmdline = "`"$PWD\bootstrap.cmd > `"$log`" 2>&1`""  # append e.g. ` -SkipWsl` after bootstrap.cmd
 $p = Start-Process cmd.exe -Verb RunAs -Wait -PassThru -ArgumentList '/c', $cmdline
 "exit: $($p.ExitCode)"
 Get-Content $log | Where-Object { $_ -notmatch '^\s*[-\\|/]\s' -and $_.Trim() }  # drop winget spinner lines
@@ -38,23 +42,31 @@ Gotchas:
 
 - **`%APPDATA%` / `%LOCALAPPDATA%` are virtualized.** Claude desktop is an MSIX app, so every
   process it spawns, including elevated ones, has AppData writes redirected to
-  `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\...`. uv's managed-Python junctions
-  then point at the real path and fail with "Missing expected target directory for Python minor
-  version link". That's why the test command above sets `UV_PYTHON_INSTALL_DIR` and
-  `UV_CACHE_DIR` to `.test-uv/`. Real runs by the user aren't affected, so don't "fix" this in
-  the scripts. Also keep it in mind when inspecting AppData from your own shell: you see the
+  `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\...`. (When stage 2 was Python, this
+  broke uv's managed-Python junctions.) Real runs by the user aren't affected, so don't "fix"
+  this in the scripts. Programs winget runs (it's its own packaged app) write to the real
+  locations. Keep it in mind when inspecting AppData from your own shell: you see the
   virtualized view.
 - **Write logs somewhere short and non-virtualized.** Use the project's `logs/`, not the
   scratchpad: that path sits under `%LOCALAPPDATA%\Temp` and is close to MAX_PATH, and
   redirecting into it silently produced no file. The target directory must already exist.
 - **Don't use PowerShell `*>` / `2>&1` redirection** around the bootstrap. In PS 5.1 that turns
-  native stderr (uv progress, etc.) into error records, which `$ErrorActionPreference = 'Stop'`
+  native stderr (winget/wsl progress, etc.) into error records, which `$ErrorActionPreference = 'Stop'`
   turns into failures. Redirect at the `cmd.exe` level as above.
 - **Redirected runs aren't interactive.** The distro install (`wsl --install -d ...`) prompts for
   a Linux username/password, so that step has to be run by the user in a real terminal.
-- **Unelevated checks you can run directly**, with uv on PATH (`$env:USERPROFILE\.local\bin`)
-  and the same `UV_*` overrides:
-  - `uv run --script configure.py --help` checks that the script parses and imports.
+- **Windows PowerShell 5.1 gotchas** (bootstrap.ps1): `& exe | Select-Object -First 1` stops the
+  pipeline early and leaves `$LASTEXITCODE` from the *previous* command, so capture all output
+  first. In any PowerShell, `-replace 'a', 'b'` inside a method call's parentheses splits into
+  two method arguments; compute it into a variable first.
+- **PowerShell 7 must be the MSI.** winget's `Microsoft.PowerShell` defaults to the MSIX build
+  (per-user, sandboxed, only a `WindowsApps\pwsh.exe` alias), so bootstrap passes
+  `--installer-type wix --scope machine`.
+- **Unelevated checks you can run directly:**
+  - `pwsh -File <test script>` that dot-sources `configure.ps1`, then calls its functions
+    (`Get-Hardware`, `Test-HardwareProfile` with faked hardware, `Invoke-Native`, the WSL
+    queries).
+  - `[Management.Automation.Language.Parser]::ParseFile(...)` for syntax.
   - `winget configure validate --file configuration\windows.dsc.yaml --module-path %CD%\dsc`
     checks the config file. It exits 1 with "found locally, but could not be found in any
     configured catalog" for each `WindowsSetupDsc` unit; that's expected for local modules.
@@ -72,7 +84,7 @@ Gotchas:
     into a misleading "capability not found". Use `Import-Module Dism -UseWindowsPowerShell`
     (as `WindowsSetupDsc` does); other Windows-only modules may need the same.
   - The elevated server (`securityContext: elevated`) does **not** inherit `PSModulePath`, but it
-    does get `--module-path`, which is how `configure.py` makes `dsc/` visible.
+    does get `--module-path`, which is how `configure.ps1` makes `dsc/` visible.
   - A class-based module is only discoverable if `Get-Module -ListAvailable` shows its
     `ExportedDscResources`. That list comes back empty when the manifest has
     `FunctionsToExport = @()`, so use `'*'`. Discovery failures show up only as "The
@@ -80,9 +92,9 @@ Gotchas:
 - **winget and the Gallery's `Microsoft.WinGet.DSC` must match.** winget always downloads the
   latest module, and winget 1.9's host (PowerShell 7.2 / .NET 6) can't load it: "Loading the
   module for the configuration unit failed", with `System.Runtime, Version=8.0.0.0` in the log.
-  That's why `configure.py` upgrades `Microsoft.AppInstaller` first. When winget upgrades
+  That's why `bootstrap.ps1` upgrades `Microsoft.AppInstaller` first. When winget upgrades
   itself, the old process exits with `0x80004004` (E_ABORT), and for a few seconds afterwards
-  launching `winget` fails with `WinError 1920`, hence the retry in `winget_version()`.
+  launching `winget` fails with `WinError 1920`, hence the retry in `Get-WingetVersion`.
 - **winget 1.29's output format** differs from 1.9's: units are listed as `Name [id]` and results
   as "Unit successfully applied." When filtering logs, match on those.
 - **Installer logs** for packages winget installs are next to winget's own logs in
@@ -94,7 +106,7 @@ Gotchas:
   GIT_EDITOR` isn't meaningful from here; use `git config --show-origin --get core.editor`.
 - **Resource warnings are lost.** `Write-Warning`/`Write-Verbose` from a DSC resource shows up
   neither in winget's console output nor in its log. Anything the user must see has to be
-  printed by `configure.py` (e.g. a hardware profile's `note`).
+  printed by `configure.ps1` (e.g. a hardware profile's `note`).
 - **Precision touchpad settings** (`HKCU\...\PrecisionTouchPad`) can't be applied live on
   Windows 10: restarting the touchpad collection, its parent I2C HID device, or Explorer all
   failed; signing out and in worked. `SPI_GET/SETTOUCHPADPARAMETERS` exists only from
@@ -110,7 +122,7 @@ Gotchas:
   - Test it unelevated with throwaway configs under `logs/` and `winget configure test` (exit 0 =
     in the desired state), and restore the original values afterwards.
 - **Keyboard:** `Scancode Map` (HKLM) is global to all keyboards and read at boot (Microsoft
-  documents both; per-keyboard remapping needs a third-party filter driver). `configure.py`
+  documents both; per-keyboard remapping needs a third-party filter driver). `configure.ps1`
   prints a restart note when it changes. For repeat settings, the live values
   (`SPI_GETKEYBOARDDELAY`/`SPEED`) and `HKCU\Control Panel\Keyboard` can disagree: in 2026-09 the
   live delay here was 0 while the registry said 1, so `KeyboardRepeat` checks both and sets them
@@ -129,7 +141,7 @@ Gotchas:
   `$true`. Leave out `securityContext: elevated` and it runs unelevated with no UAC prompt, so
   you can run `winget configure --file logs\x.dsc.yaml --accept-configuration-agreements
   --disable-interactivity` directly. Add the directive only for things that need admin.
-- **`wsl.exe` output** is UTF-16LE unless `WSL_UTF8=1` is set; `configure.py` handles both.
+- **`wsl.exe` output** is UTF-16LE unless `WSL_UTF8=1` is set; `configure.ps1` handles both.
 
 ## Machine-specific history (Windows 10 22H2, 19045)
 
@@ -144,4 +156,4 @@ Gotchas:
   second was a no-op (ansible-core 2.21.4, ansible.windows 3.8.0).
 - 2026-09-18: App Installer upgraded 1.24 → 1.29 (winget 1.9 → 1.29.290) and Git 2.33.0.2 →
   2.55.0.3 by this configuration. VS Code (user scope) and Windows Terminal 1.21 were already
-  installed. A full `--skip-wsl` re-run takes about 15 seconds and changes nothing.
+  installed. A full `-SkipWsl` re-run takes about 15 seconds and changes nothing.

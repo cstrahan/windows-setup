@@ -180,6 +180,18 @@ properties:
         Ensure: Present
         Force: true
 
+    # uv, the Python package and project manager. (PowerShell 7 isn't here: bootstrap.ps1
+    # installs and updates it, since configure.ps1 runs in it.)
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: uv
+      directives:
+        description: Install uv
+        allowPrerelease: false
+      settings:
+        Id: astral-sh.uv
+        Source: winget
+        UseLatest: true
+
     # VS Code updates itself, so only its presence is managed.
     - resource: Microsoft.WinGet.DSC/WinGetPackage
       id: vscode

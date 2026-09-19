@@ -13,17 +13,20 @@ reboot and run it again.
 ## How it works
 
 1. **`bootstrap.cmd`** runs `bootstrap.ps1`, bypassing the execution policy.
-2. **`bootstrap.ps1`** (stage 1, PowerShell) elevates, registers winget if needed, installs
-   [uv](https://docs.astral.sh/uv/) into `%USERPROFILE%\.local\bin` if needed, then runs
-   `configure.py` with `uv run`. uv provides Python, so none has to be installed.
-3. **`configure.py`** (stage 2, Python):
-   - applies `configuration/windows.dsc.yaml` with `winget configure`
+2. **`bootstrap.ps1`** (stage 1, in Windows PowerShell 5.1, which is all a fresh install has):
+   - elevates
+   - registers winget if needed, and upgrades it
+   - installs or upgrades PowerShell 7 (the MSI, via winget)
+   - runs `configure.ps1` in PowerShell 7
+3. **`configure.ps1`** (stage 2, PowerShell 7):
+   - applies `configuration/windows.dsc.yaml` with `winget configure`, then any matching
+     hardware profiles
    - enables WSL 2 (reboot required the first time), installs the distro (default
      `Ubuntu`, the latest LTS; you create the Linux user interactively)
    - installs uv in the distro, and `ansible-core` plus the `ansible` collections as a uv tool
 
-Arguments to `bootstrap.cmd` pass through to `configure.py`:
-`--skip-winget`, `--skip-wsl`, `--distro NAME`.
+Arguments to `bootstrap.cmd` pass through to `configure.ps1`:
+`-SkipWinget`, `-SkipWsl`, `-Distro NAME`.
 
 ## Configuration
 
@@ -51,16 +54,16 @@ Currently configured:
 - Keyboard repeat (current user): shortest repeat delay, fastest repeat rate. Applied immediately.
 - Caps Lock acts as an extra Left Ctrl, on every keyboard. It takes effect after a restart:
   Windows' remapping (`Scancode Map`) applies to all keyboards and is read at boot.
-- Visual Studio Code and Windows Terminal installed.
+- uv, Visual Studio Code and Windows Terminal installed.
 - Go, latest stable release (at least 1.27.1), from go.dev's official MSI (checksum-verified).
 - Git for Windows, latest version, with pinned installer choices: Explorer integration, editor,
   Windows OpenSSH, line endings, etc. Changing a choice re-runs the installer.
 
 ### Hardware profiles
 
-`configuration/hardware.toml` lists extra configurations that apply only to matching
+`configuration/hardware.psd1` lists extra configurations that apply only to matching
 hardware. Profiles match on the machine's vendor, model and version, and optionally on a
-present device's hardware ID. After `windows.dsc.yaml`, `configure.py` applies every profile
+present device's hardware ID. After `windows.dsc.yaml`, `configure.ps1` applies every profile
 that matches, and logs the ones it skips. Currently:
 
 - **System76 Gazelle (gaze16) with the ELAN0412 touchpad**: turns off touchpad tapping

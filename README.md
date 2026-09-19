@@ -1,14 +1,25 @@
 # windows-setup
 
 Declarative setup for a fresh Windows 10+ install. Run it right after creating and
-logging in as your user:
+logging in as your user. No clone needed; in Windows PowerShell:
 
-```bat
-bootstrap.cmd
+```powershell
+irm https://raw.githubusercontent.com/cstrahan/windows-setup/main/install.ps1 | iex
 ```
 
 It asks for elevation once and is safe to re-run. If it says a reboot is required,
 reboot and run it again.
+
+`install.ps1` resolves `main` to a commit, downloads that commit's zip from GitHub into
+`%LOCALAPPDATA%\windows-setup\<commit>` (reused if already there; the three most recently
+used commits are kept), and runs its `bootstrap.ps1`. To pass options, such as a different
+branch, tag or commit (`-Ref`), or bootstrap arguments (see below):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/cstrahan/windows-setup/main/install.ps1))) -Ref main -SkipWsl
+```
+
+From a clone, run `bootstrap.cmd` directly instead.
 
 ## How it works
 

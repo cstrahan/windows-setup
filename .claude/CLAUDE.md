@@ -20,6 +20,15 @@ See README.md for what the project does. These notes cover testing it from a Cla
   class resources in nested modules (checked in winget's host). To add a resource, add both
   manifest entries. Everything else in `dsc/` is Gallery modules winget downloaded
   (git-ignored).
+- `install.ps1`: the README's one-liner (`irm .../install.ps1 | iex`). Resolves a ref to a commit
+  via the GitHub API, caches the extracted zip in `%LOCALAPPDATA%\windows-setup\<sha>`, runs
+  its `bootstrap.ps1`. Must stay 5.1-compatible, keep everything inside its `& { } @args`
+  block (iex runs in the caller's scope), and never `exit` (that closes the caller's window).
+  Test it locally with `& ([scriptblock]::Create((Get-Content -Raw install.ps1))) -CacheDir
+  <repo>\logs\cache ...`, run from an elevated `cmd` so the bootstrap doesn't relaunch into a
+  separate window. Don't use the default cache from here: `%LOCALAPPDATA%` is virtualized for
+  Claude's processes, and winget (outside the sandbox) wouldn't see the files. It fetches
+  what's on GitHub, so local changes need pushing first.
 - Exit code `3010` means "restart, then re-run". Every step must stay idempotent.
 
 ## Testing from the Claude desktop app

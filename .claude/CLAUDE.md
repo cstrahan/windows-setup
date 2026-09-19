@@ -336,6 +336,42 @@ Gotchas:
   with no UAC. Use it for anything that must write the user's real `%LOCALAPPDATA%` (Neovim's
   config and data, mise installs). Reading those locations from your own shell is fine.
 
+## Testing interactive console apps (tools\ConsoleHarness)
+
+Terminal UIs (the fzf pickers, Neovim) can be driven and read from a script, so their interactions
+don't need a human at the keyboard:
+
+```powershell
+Import-Module .\tools\ConsoleHarness
+$session = Start-ConsoleApp -Command '. "$HOME\.config\powershell\profile.d\40-fzf-functions.ps1"; _fzf_select_path' -WorkingDirectory $PWD
+try {
+    Wait-ConsoleText $session 'Files> '            # poll, don't sleep
+    Send-ConsoleKeys $session 'psfzf'              # literal text
+    $screen = Send-ConsoleKeys $session 'ctrl-s'   # chord; returns the redrawn screen as string[]
+} finally { Stop-ConsoleApp $session }             # always
+```
+
+- **How:** the app runs in its own hidden console; each call spawns a worker that attaches to it
+  (`AttachConsole`), reads the visible grid (`ReadConsoleOutputCharacter`) and injects keys
+  (`WriteConsoleInput`). conhost has already rendered the app's escape sequences into that grid,
+  so there's **no terminal emulation and no VT parsing**, and input doesn't need window focus. A
+  process can attach to only one console, hence the separate worker process (~0.2 s per call).
+- **Why not the alternatives:** ConPTY would need a screen emulator (xterm.js headless, pyte) to
+  get the same grid; UI Automation on the console window can read text but injects keys through
+  the focused window. Nothing suitable exists on the PowerShell Gallery (the only near-match,
+  `Expect` 0.0.1, is pipe-based and can't drive a full-screen TUI).
+- **Verified 2026-09-19:** `fdg`'s files/directories toggle (prompt, list and preview all change),
+  typing to filter, and Neovim (file opens, `<leader>` shows which-key, `:qa!` exits).
+- **Gotchas:**
+  - Assert on lasting UI state, not messages: LazyVim's `noice` shows `:version` and friends in a
+    popup that fades before the next read.
+  - Give redraws time with `-SettleMilliseconds` (250 default; 600+ for fzf reloads, 1500 for
+    Neovim popups), or better, `Wait-ConsoleText`.
+  - It reads the visible window, not scrollback, and text only (no colours).
+  - PowerShell variable names are case-insensitive: inside the worker, a `$out` handle would
+    silently clobber an `$Out` parameter (it wrote the screen to a file named after the handle
+    before that was fixed).
+
 ## Neovim / LazyVim (set up by hand on 2026-09-19; config not managed yet)
 
 The `neovim` workload handles the prerequisites; the LazyVim config itself was installed manually

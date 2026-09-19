@@ -133,8 +133,12 @@ function Test-Administrator {
 function Invoke-WingetConfiguration([string] $Path) {
     Write-Step "Applying winget configuration $([System.IO.Path]::GetRelativePath($Root, $Path))"
     # PSModulePath isn't inherited by winget's elevated configuration server; --module-path is.
+    # --nowarn drops the legal disclaimer winget prints despite --accept-configuration-agreements,
+    # and --suppress-initial-details the up-front dump of every unit's module and settings.
+    # Failures are still reported in full.
     Invoke-Native winget.exe @('configure', '--file', $Path, '--module-path', $DscModules,
-        '--accept-configuration-agreements', '--disable-interactivity') | Out-Null
+        '--accept-configuration-agreements', '--disable-interactivity',
+        '--nowarn', '--suppress-initial-details') | Out-Null
 }
 
 # Windows' keyboard remapping, as hex ('' if unset). It only takes effect after a restart.

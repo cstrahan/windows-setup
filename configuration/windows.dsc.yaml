@@ -1,278 +1,332 @@
-# yaml-language-server: $schema=https://aka.ms/configuration-dsc-schema/0.2
+# Base Windows configuration (DSC v3). configure.ps1 applies it with
+#   dsc config set --file configuration\windows.dsc.yaml
+# with the repo's dsc\ folder on PSModulePath, for the WindowsSetup.* resources.
+# `dsc config test --file ...` reports drift without changing anything.
 #
-# Declarative Windows configuration, applied with:
-#   winget configure --file configuration\windows.dsc.yaml --module-path %CD%\dsc
-#   (--module-path must be absolute; run from the repo root.)
-# `winget configure test ...` (same arguments) reports drift without changing anything.
-properties:
-  configurationVersion: 0.2.0
-  resources:
-    # Ships with Windows 10 1809+, but it's an optional capability that can be missing.
-    # WindowsSetupDsc is this repo's own module (dsc/), not ComputerManagementDsc: the DISM
-    # cmdlets fail natively inside winget's PowerShell 7 host on Windows 10.
-    - resource: WindowsSetupDsc/WindowsCapability
-      id: openSshClient
-      directives:
-        description: Install the OpenSSH client (ssh, ssh-agent, ssh-add)
-        securityContext: elevated
-        allowPrerelease: false
-      settings:
-        Name: OpenSSH.Client~~~~0.0.1.0
-        Ensure: Present
+# Note: DSC v3 calls each resource's set without testing first, so every resource here must be
+# idempotent on its own (the WindowsSetup.* ones check before acting).
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  # --- OpenSSH ---------------------------------------------------------------------------
 
-    # The OpenSSH agent is disabled by default.
-    - resource: PSDscResources/Service
-      id: sshAgent
-      dependsOn:
-        - openSshClient
-      directives:
-        description: Start the OpenSSH agent automatically, and now
-        securityContext: elevated
-        allowPrerelease: false
-      settings:
-        Name: ssh-agent
-        StartupType: Automatic
-        State: Running
-        Ensure: Present
+  # Ships with Windows 10 1809+, but it's an optional capability that can be missing.
+  # Our own resource: DSC's Microsoft.Windows/FeatureOnDemandList won't run from DSC's MSIX install.
+  - name: openSshClient
+    type: WindowsSetup.WindowsCapability/WindowsCapability
+    properties:
+      Name: OpenSSH.Client~~~~0.0.1.0
+      Ensure: Present
 
-    # Keep the hardware clock (RTC) in UTC, like Linux does, so dual-booting doesn't skew the clock.
-    # Windows reads this at boot, so it takes effect after a reboot.
-    - resource: PSDscResources/Registry
-      id: rtcIsUniversal
-      directives:
-        description: Treat the hardware clock (RTC) as UTC
-        securityContext: elevated
-        allowPrerelease: false
-      settings:
-        Key: HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\TimeZoneInformation
-        ValueName: RealTimeIsUniversal
-        ValueType: QWord
-        ValueData: "1"
-        Ensure: Present
-        Force: true
+  # The OpenSSH agent is disabled by default.
+  - name: sshAgent
+    type: Microsoft.Windows/Service
+    dependsOn:
+      - "[resourceId('WindowsSetup.WindowsCapability/WindowsCapability', 'openSshClient')]"
+    properties:
+      name: ssh-agent
+      startType: Automatic
+      status: Running
 
-    # Windows only polls its time server every several hours (SpecialPollInterval) and doesn't
-    # resync on wake, so after sleep, hibernation or Fast Startup the clock can stay wrong for
-    # hours. Keep the time service running, and resync whenever the network connects or the
-    # machine resumes.
-    - resource: PSDscResources/Service
-      id: timeService
-      directives:
-        description: 'Time: keep the Windows Time service running'
-        securityContext: elevated
-        allowPrerelease: false
-      settings:
-        Name: W32Time
-        StartupType: Automatic  # non-domain Windows 10 defaults to a trigger start
-        State: Running
-        Ensure: Present
+  # --- Time --------------------------------------------------------------------------------
 
-    - resource: ComputerManagementDsc/ScheduledTask
-      id: timeResyncTask
-      dependsOn:
-        - timeService
-      directives:
-        description: 'Time: resync when the network connects or the machine resumes'
-        securityContext: elevated
-        allowPrerelease: false
-      settings:
-        TaskPath: \windows-setup\
-        TaskName: Resync time
-        Description: Resync the clock (w32tm /resync) when a network connects or the machine resumes from sleep. Managed by windows-setup.
-        ActionExecutable: '%SystemRoot%\System32\w32tm.exe'
-        ActionArguments: /resync
-        ScheduleType: OnEvent
-        # NetworkProfile 10000 = network connected; Power-Troubleshooter 1 = resumed from sleep.
-        EventSubscription: >-
-          <QueryList><Query Id="0" Path="Microsoft-Windows-NetworkProfile/Operational">
-          <Select Path="Microsoft-Windows-NetworkProfile/Operational">*[System[Provider[@Name='Microsoft-Windows-NetworkProfile'] and EventID=10000]]</Select>
-          <Select Path="System">*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]</Select>
-          </Query></QueryList>
-        Delay: '00:00:15'  # give DNS a moment after the network comes up
-        BuiltInAccount: SYSTEM
-        MultipleInstances: IgnoreNew
-        ExecutionTimeLimit: '00:05:00'
-        # Task Scheduler's defaults skip tasks on battery, which would defeat this on laptops.
-        AllowStartIfOnBatteries: true
-        DontStopIfGoingOnBatteries: true
-        Enable: true
-        Ensure: Present
+  # Keep the hardware clock (RTC) in UTC, like Linux does, so dual-booting doesn't skew the
+  # clock. Windows reads this at boot, so it takes effect after a reboot.
+  - name: rtcIsUniversal
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation
+      valueName: RealTimeIsUniversal
+      valueData: { QWord: 1 }
 
-    # Explorer > Folder Options, per user (HKCU): only settings that differ from the Windows 10
-    # defaults. Explorer picks them up in new windows after restarting it (or signing out).
-    - resource: PSDscResources/Registry
-      id: explorerShowHiddenFiles
-      directives:
-        description: 'Folder Options: Show hidden files, folders, and drives'
-        allowPrerelease: false
-      settings:
-        Key: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
-        ValueName: Hidden
-        ValueType: DWord
-        ValueData: "1"  # default 2: don't show
-        Ensure: Present
-        Force: true
+  # Windows only polls its time server every several hours (SpecialPollInterval) and doesn't
+  # resync on wake, so after sleep, hibernation or Fast Startup the clock can stay wrong for
+  # hours. Keep the time service running, and resync whenever the network connects or the
+  # machine resumes.
+  - name: timeService
+    type: Microsoft.Windows/Service
+    properties:
+      name: W32Time
+      startType: Automatic  # non-domain Windows 10 defaults to a trigger start
+      status: Running
 
-    - resource: PSDscResources/Registry
-      id: explorerShowFileExtensions
-      directives:
-        description: 'Folder Options: uncheck "Hide extensions for known file types"'
-        allowPrerelease: false
-      settings:
-        Key: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
-        ValueName: HideFileExt
-        ValueType: DWord
-        ValueData: "0"  # default 1
-        Ensure: Present
-        Force: true
+  - name: timeResyncTask
+    type: WindowsSetup.ScheduledTask/ScheduledTask
+    dependsOn:
+      - "[resourceId('Microsoft.Windows/Service', 'timeService')]"
+    properties:
+      TaskPath: \windows-setup\
+      TaskName: Resync time
+      Description: Resync the clock (w32tm /resync) when a network connects or the machine resumes from sleep. Managed by windows-setup.
+      Execute: '%SystemRoot%\System32\w32tm.exe'
+      Arguments: /resync
+      # NetworkProfile 10000 = network connected; Power-Troubleshooter 1 = resumed from sleep.
+      EventSubscription: >-
+        <QueryList><Query Id="0" Path="Microsoft-Windows-NetworkProfile/Operational">
+        <Select Path="Microsoft-Windows-NetworkProfile/Operational">*[System[Provider[@Name='Microsoft-Windows-NetworkProfile'] and EventID=10000]]</Select>
+        <Select Path="System">*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]</Select>
+        </Query></QueryList>
+      Delay: PT15S  # give DNS a moment after the network comes up
+      RunAs: SYSTEM
+      MultipleInstances: IgnoreNew
+      ExecutionTimeLimit: PT5M
+      # Task Scheduler's defaults skip tasks on battery, which would defeat this on laptops.
+      AllowStartIfOnBatteries: true
+      DontStopIfGoingOnBatteries: true
 
-    - resource: PSDscResources/Registry
-      id: explorerShowEmptyDrives
-      directives:
-        description: 'Folder Options: uncheck "Hide empty drives"'
-        allowPrerelease: false
-      settings:
-        Key: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
-        ValueName: HideDrivesWithNoMedia
-        ValueType: DWord
-        ValueData: "0"  # default 1
-        Ensure: Present
-        Force: true
+  # --- System (from microsoft/WindowsDeveloperConfig's registry-system step) -----------------
 
-    - resource: PSDscResources/Registry
-      id: explorerFullPathInTitleBar
-      directives:
-        description: 'Folder Options: check "Display the full path in the title bar"'
-        allowPrerelease: false
-      settings:
-        Key: HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState
-        ValueName: FullPath
-        ValueType: DWord
-        ValueData: "1"  # default 0
-        Ensure: Present
-        Force: true
+  # Sudo for Windows, inline mode (runs in the same window). Windows 11 24H2+ only; inert on
+  # Windows 10, which has no sudo.
+  - name: sudoInline
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo
+      valueName: Enabled
+      valueData: { DWord: 3 }
 
-    # Keyboard repeat (Control Panel > Keyboard): applied immediately and saved.
-    - resource: WindowsSetupDsc/KeyboardRepeat
-      id: keyboardRepeat
-      directives:
-        description: 'Keyboard: shortest repeat delay, fastest repeat rate'
-        allowPrerelease: false
-      settings:
-        IsSingleInstance: "Yes"  # quoted: YAML would otherwise read it as a boolean
-        RepeatDelay: 0  # default 1
-        RepeatRate: 31  # the default, and the fastest
+  # Developer Mode (sideloading and developer features; the WinUI/WinForms workflows expect it).
+  - name: developerMode
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock
+      valueName: AllowDevelopmentWithoutDevLicense
+      valueData: { DWord: 1 }
 
-    # Caps Lock acts as an extra Left Ctrl, on every keyboard. Windows' Scancode Map can't be
-    # per-keyboard, and takes effect after a restart. Format: 8-byte header, entry count 2 (one
-    # mapping + terminator), 1D00 3A00 = Left Ctrl (0x1D) replacing Caps Lock (0x3A), terminator.
-    - resource: PSDscResources/Registry
-      id: capsLockAsCtrl
-      directives:
-        description: 'Keyboard: Caps Lock acts as Left Ctrl (after a restart)'
-        securityContext: elevated
-        allowPrerelease: false
-      settings:
-        Key: HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Keyboard Layout
-        ValueName: Scancode Map
-        ValueType: Binary
-        ValueData: "0000000000000000020000001d003a0000000000"
-        Ensure: Present
-        Force: true
+  # Win32 long path support (paths beyond MAX_PATH, for apps that opt in).
+  - name: longPaths
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKLM\SYSTEM\CurrentControlSet\Control\FileSystem
+      valueName: LongPathsEnabled
+      valueData: { DWord: 1 }
 
-    # Windows PowerShell's default policy (Restricted) blocks local scripts, including Scoop's
-    # `scoop.ps1` shim. RemoteSigned for the current user is what Scoop asks for. This is the
-    # value `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` writes. (PowerShell 7 already
-    # defaults to RemoteSigned. Scoop itself is installed by bootstrap.ps1, since its installer
-    # runs unelevated.)
-    - resource: PSDscResources/Registry
-      id: windowsPowerShellExecutionPolicy
-      directives:
-        description: 'Windows PowerShell: RemoteSigned execution policy for the current user'
-        allowPrerelease: false
-      settings:
-        Key: HKEY_CURRENT_USER\Software\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell
-        ValueName: ExecutionPolicy
-        ValueType: String
-        ValueData: RemoteSigned
-        Ensure: Present
-        Force: true
+  # Allow Remote Desktop connections. The "Remote Desktop" firewall rules stay as they are
+  # (off by default), so connections are still blocked until those are enabled.
+  - name: remoteDesktop
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server
+      valueName: fDenyTSConnections
+      valueData: { DWord: 0 }
 
-    # uv, the Python package and project manager. (PowerShell 7 isn't here: bootstrap.ps1
-    # installs and updates it, since configure.ps1 runs in it.)
-    - resource: Microsoft.WinGet.DSC/WinGetPackage
-      id: uv
-      directives:
-        description: Install uv
-        allowPrerelease: false
-      settings:
-        Id: astral-sh.uv
-        Source: winget
-        UseLatest: true
+  # --- Explorer, per user (HKCU) ---------------------------------------------------------
+  # Explorer picks these up in new windows after restarting it (or signing out).
 
-    # VS Code updates itself, so only its presence is managed.
-    - resource: Microsoft.WinGet.DSC/WinGetPackage
-      id: vscode
-      directives:
-        description: Install Visual Studio Code
-        allowPrerelease: false
-      settings:
-        Id: Microsoft.VisualStudioCode
-        Source: winget
+  # Folder Options: only settings that differ from the Windows 10 defaults.
+  - name: explorerShowHiddenFiles
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+      valueName: Hidden
+      valueData: { DWord: 1 }  # default 2: don't show
 
-    - resource: Microsoft.WinGet.DSC/WinGetPackage
-      id: windowsTerminal
-      directives:
-        description: Install Windows Terminal
-        allowPrerelease: false
-      settings:
-        Id: Microsoft.WindowsTerminal
-        Source: winget
+  - name: explorerShowFileExtensions
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+      valueName: HideFileExt
+      valueData: { DWord: 0 }  # default 1
 
-    # From go.dev rather than winget's GoLang.Go, which can trail upstream releases by days.
-    - resource: WindowsSetupDsc/GoLang
-      id: go
-      directives:
-        description: Install the latest stable Go from go.dev
-        securityContext: elevated
-        allowPrerelease: false
-      settings:
-        IsSingleInstance: "Yes"  # quoted: YAML would otherwise read it as a boolean
-        UseLatest: true
-        MinimumVersion: 1.27.1
+  - name: explorerShowEmptyDrives
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+      valueName: HideDrivesWithNoMedia
+      valueData: { DWord: 0 }  # default 1
 
-    # The installer only offers some choices when their targets exist: EditorOption needs VS Code,
-    # the windowsterminal component needs Windows Terminal, and ExternalOpenSSH makes Git use
-    # Windows' OpenSSH (and so the ssh-agent service) instead of its bundled copy.
-    - resource: WindowsSetupDsc/GitForWindows
-      id: git
-      dependsOn:
-        - vscode
-        - windowsTerminal
-        - openSshClient
-      directives:
-        description: Install Git for Windows with these installer choices
-        securityContext: elevated
-        allowPrerelease: false
-      settings:
-        Id: Git.Git
-        UseLatest: true
-        Components:
-          - ext\shellhere      # Explorer: "Open Git Bash here"
-          - ext\guihere        # Explorer: "Open Git GUI here"
-          - gitlfs
-          - assoc              # .gitconfig, .gitattributes, ... open in the editor
-          - assoc_sh           # .sh files run with Bash
-          - windowsterminal    # Git Bash profile in Windows Terminal
-        EditorOption: VisualStudioCode
-        DefaultBranchOption: main
-        PathOption: Cmd
-        SSHOption: ExternalOpenSSH
-        CURLOption: WinSSL
-        CRLFOption: CRLFAlways
-        BashTerminalOption: MinTTY
-        GitPullBehaviorOption: Merge
-        UseCredentialManager: Enabled
-        PerformanceTweaksFSCache: Enabled
-        EnableSymlinks: Enabled
-        EnableFSMonitor: Disabled
+  - name: explorerFullPathInTitleBar
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState
+      valueName: FullPath
+      valueData: { DWord: 1 }  # default 0
+
+  # From microsoft/WindowsDeveloperConfig's registry-explorer step:
+  - name: explorerOpenToThisPC
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+      valueName: LaunchTo
+      valueData: { DWord: 1 }  # default: Quick access
+
+  - name: quickAccessNoFrequentFolders
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer
+      valueName: ShowFrequent
+      valueData: { DWord: 0 }
+
+  - name: quickAccessNoRecentFiles
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer
+      valueName: ShowRecent
+      valueData: { DWord: 0 }
+
+  # Windows 11 only (recommended/cloud files in Quick Access).
+  - name: quickAccessNoCloudFiles
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer
+      valueName: ShowCloudFilesInQuickAccess
+      valueData: { DWord: 0 }
+
+  - name: explorerNoSyncProviderTips
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+      valueName: ShowSyncProviderNotifications
+      valueData: { DWord: 0 }
+
+  # --- Taskbar, Start and search (from microsoft/WindowsDeveloperConfig's registry-taskbar-search
+  # step; its Do Not Disturb and Bluetooth-icon tweaks are left out) ---------------------------
+
+  # "End task" on taskbar right-click. Windows 11 23H2+ only.
+  - name: taskbarEndTask
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings
+      valueName: TaskbarEndTask
+      valueData: { DWord: 1 }
+
+  # No web results in Start/search.
+  - name: searchNoWebSuggestions
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Policies\Microsoft\Windows\Explorer
+      valueName: DisableSearchBoxSuggestions
+      valueData: { DWord: 1 }
+
+  # No "search highlights" (daily trivia and trending searches in the search box).
+  - name: searchNoHighlights
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\SearchSettings
+      valueName: IsDynamicSearchBoxEnabled
+      valueData: { DWord: 0 }
+
+  # No recommendations in Start. Windows 11 only.
+  - name: startNoRecommendations
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+      valueName: Start_IrisRecommendations
+      valueData: { DWord: 0 }
+
+  # No widgets. This policy is Windows 11's; Windows 10's "News and interests" taskbar feed is
+  # the next one.
+  - name: noWidgets
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKLM\SOFTWARE\Policies\Microsoft\Dsh
+      valueName: AllowNewsAndInterests
+      valueData: { DWord: 0 }
+
+  - name: noNewsAndInterests
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds
+      valueName: EnableFeeds
+      valueData: { DWord: 0 }
+
+  # --- Keyboard ------------------------------------------------------------------------------
+
+  # Keyboard repeat (Control Panel > Keyboard): applied immediately and saved.
+  - name: keyboardRepeat
+    type: WindowsSetup.KeyboardRepeat/KeyboardRepeat
+    properties:
+      IsSingleInstance: "Yes"  # quoted: YAML would otherwise read it as a boolean
+      RepeatDelay: 0  # default 1
+      RepeatRate: 31  # the default, and the fastest
+
+  # Caps Lock acts as an extra Left Ctrl, on every keyboard. Windows' Scancode Map can't be
+  # per-keyboard, and takes effect after a restart. Format: 8-byte header, entry count 2 (one
+  # mapping + terminator), 1D 00 3A 00 = Left Ctrl (0x1D) replacing Caps Lock (0x3A), terminator.
+  - name: capsLockAsCtrl
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKLM\SYSTEM\CurrentControlSet\Control\Keyboard Layout
+      valueName: Scancode Map
+      valueData: { Binary: [0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 29, 0, 58, 0, 0, 0, 0, 0] }
+
+  # --- PowerShell ----------------------------------------------------------------------------
+
+  # Windows PowerShell's default policy (Restricted) blocks local scripts, including Scoop's
+  # `scoop.ps1` shim. RemoteSigned for the current user is what Scoop asks for, and is the value
+  # `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` writes. (PowerShell 7 already defaults
+  # to RemoteSigned. Scoop itself is installed by bootstrap.ps1, since its installer runs
+  # unelevated.)
+  - name: windowsPowerShellExecutionPolicy
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell
+      valueName: ExecutionPolicy
+      valueData: { String: RemoteSigned }
+
+  # --- Apps ----------------------------------------------------------------------------------
+  # (PowerShell 7 and the DSC engine aren't here: bootstrap.ps1 installs and updates them, since
+  # this configuration runs in them.)
+
+  # uv, the Python package and project manager.
+  - name: uv
+    type: Microsoft.WinGet/Package
+    properties:
+      id: astral-sh.uv
+      source: winget
+      useLatest: true
+      acceptAgreements: true
+
+  # VS Code updates itself, so only its presence is managed.
+  - name: vscode
+    type: Microsoft.WinGet/Package
+    properties:
+      id: Microsoft.VisualStudioCode
+      source: winget
+      acceptAgreements: true
+
+  - name: windowsTerminal
+    type: Microsoft.WinGet/Package
+    properties:
+      id: Microsoft.WindowsTerminal
+      source: winget
+      acceptAgreements: true
+
+  # From go.dev rather than winget's GoLang.Go, which can trail upstream releases by days.
+  - name: go
+    type: WindowsSetup.GoLang/GoLang
+    properties:
+      IsSingleInstance: "Yes"  # quoted: YAML would otherwise read it as a boolean
+      UseLatest: true
+      MinimumVersion: 1.27.1
+
+  # The installer only offers some choices when their targets exist: EditorOption needs VS Code,
+  # the windowsterminal component needs Windows Terminal, and ExternalOpenSSH makes Git use
+  # Windows' OpenSSH (and so the ssh-agent service) instead of its bundled copy.
+  - name: git
+    type: WindowsSetup.GitForWindows/GitForWindows
+    dependsOn:
+      - "[resourceId('Microsoft.WinGet/Package', 'vscode')]"
+      - "[resourceId('Microsoft.WinGet/Package', 'windowsTerminal')]"
+      - "[resourceId('WindowsSetup.WindowsCapability/WindowsCapability', 'openSshClient')]"
+    properties:
+      Id: Git.Git
+      UseLatest: true
+      Components:
+        - ext\shellhere      # Explorer: "Open Git Bash here"
+        - ext\guihere        # Explorer: "Open Git GUI here"
+        - gitlfs
+        - assoc              # .gitconfig, .gitattributes, ... open in the editor
+        - assoc_sh           # .sh files run with Bash
+        - windowsterminal    # Git Bash profile in Windows Terminal
+      EditorOption: VisualStudioCode
+      DefaultBranchOption: main
+      PathOption: Cmd
+      SSHOption: ExternalOpenSSH
+      CURLOption: WinSSL
+      CRLFOption: CRLFAlways
+      BashTerminalOption: MinTTY
+      GitPullBehaviorOption: Merge
+      UseCredentialManager: Enabled
+      PerformanceTweaksFSCache: Enabled
+      EnableSymlinks: Enabled
+      EnableFSMonitor: Disabled

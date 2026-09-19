@@ -1,0 +1,32 @@
+# Node.js LTS plus the TypeScript compiler (from microsoft/WindowsDeveloperConfig's typescript
+# workload).
+#
+# PowerShellScript steps: DSC v3 runs setScript without testing first, so each setScript starts
+# by running the test itself. getScript outputs nothing (`return`, not `'$null'`, which
+# is output [null]), so a set that prints nothing matches it and reports no change.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  - name: node
+    type: Microsoft.WinGet/Package
+    properties:
+      id: OpenJS.NodeJS.LTS
+      source: winget
+      acceptAgreements: true
+
+  - name: typescript
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    dependsOn:
+      - "[resourceId('Microsoft.WinGet/Package', 'node')]"
+    properties:
+      getScript: 'return'
+      testScript: |
+        # Installers update PATH in the registry, not in running processes.
+        $env:Path = ([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User') | Where-Object { $_ }) -join ';'
+        [bool] (Get-Command tsc -ErrorAction SilentlyContinue)
+      setScript: |
+        $env:Path = ([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User') | Where-Object { $_ }) -join ';'
+        if (Get-Command tsc -ErrorAction SilentlyContinue) { return }
+        if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { throw 'npm is not on PATH after installing Node.js' }
+        $output = & npm install --global --no-fund --no-audit typescript 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "npm install --global typescript failed ($LASTEXITCODE): $($output -join ' ')" }
+        'installed typescript'

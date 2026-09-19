@@ -1,0 +1,11 @@
+# Visual Studio 2026 Community, with no workloads of its own: the workloads that need it (rust,
+# winforms, winui) each add their components with WindowsSetup.VisualStudioComponents. Not
+# pinned to a version, and not upgraded by winget: Visual Studio updates itself.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  - name: visualStudio
+    type: Microsoft.WinGet/Package
+    properties:
+      id: Microsoft.VisualStudio.Community
+      source: winget
+      acceptAgreements: true

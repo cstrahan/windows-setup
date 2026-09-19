@@ -1,6 +1,6 @@
 # GoLang: Go from go.dev's official Windows MSI.
 
-using module .\Common.psm1
+using module WindowsSetup.Common
 
 # 'go1.27.1' / '1.27.1' -> [version] 1.27.1
 function ConvertTo-GoVersion([string] $Version) {
@@ -127,6 +127,7 @@ class GoLang {
     }
 
     [void] Set() {
+        if ($this.Test()) { return }  # DSC v3 calls Set() without testing first
         $installed = Get-GoInstall
         if ($this.Ensure -eq [Ensure]::Absent) {
             if ($installed) {

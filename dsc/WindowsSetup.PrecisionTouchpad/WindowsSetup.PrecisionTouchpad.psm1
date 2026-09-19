@@ -1,6 +1,6 @@
 # PrecisionTouchpad: per-user precision touchpad settings.
 
-using module .\Common.psm1
+using module WindowsSetup.Common
 
 # Two mechanisms, chosen per machine:
 # - Windows 11 24H2+: SPI_GET/SETTOUCHPADPARAMETERS with TOUCHPAD_PARAMETERS_V1. Documented,
@@ -296,8 +296,9 @@ class PrecisionTouchpad {
     }
 
     [void] Set() {
+        if ($this.Test()) { return }  # DSC v3 calls Set() without testing first
         if (-not (Set-TouchpadState (Get-TouchpadDesired $this))) {
-            # winget doesn't surface this; hardware profiles print a note instead.
+            # Shown by dsc as a warning; hardware profiles also print a note.
             Write-Warning 'Touchpad settings saved; they take effect at the next sign-in (applying them immediately needs Windows 11 24H2 or later).'
         }
     }

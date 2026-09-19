@@ -8,25 +8,28 @@ See README.md for what the project does. These notes cover testing it from a Cla
   **unelevated** and refuses to run otherwise. The unelevated section (`Invoke-UnelevatedSection`)
   installs per-user things as the user (Scoop, so `~\scoop` isn't owned by Administrators). It
   then relaunches itself with `--elevated-relaunch` via UAC for the elevated section
-  (`Invoke-ElevatedSection`): register and upgrade winget, install/upgrade PowerShell 7 (the
-  MSI), run `configure.ps1` with `C:\Program Files\PowerShell\7\pwsh.exe` (full path: PATH isn't
+  (`Invoke-ElevatedSection`): register and upgrade winget, VC++ runtime, install/upgrade DSC v3
+  (`Microsoft.DSC`) and PowerShell 7 (the MSI), run `configure.ps1` with `C:\Program Files\PowerShell\7\pwsh.exe` (full path: PATH isn't
   refreshed in that session). The elevated window pauses for Enter at the end unless its output
   is redirected. Unelevated-only steps belong in the unelevated section. De-elevating from the
   elevated section is possible but not simple; see "Future directions" for what was measured and
   a design for supporting bootstrap starts from an elevated prompt.
-- `configure.ps1` (stage 2, PowerShell 7): applies `configuration/windows.dsc.yaml` with
-  `winget configure --module-path <repo>\dsc` (must be an absolute path), then matching
-  hardware profiles (`configuration/hardware.psd1`), then sets up WSL 2, the distro, and
-  uv + Ansible inside it. Programs are run through `Invoke-Native` (console passthrough or
-  `-Capture`, `-InputText`, `-TimeoutSeconds`). Dot-sourcing it (`. .\configure.ps1`) only
-  defines the functions, so they can be tested directly in `pwsh` without admin.
-- `dsc/WindowsSetupDsc/`: our own class-based DSC resources, for gaps in the Gallery modules.
-  One `<Resource>.psm1` per resource, listed in the manifest's `NestedModules` and
-  `DscResourcesToExport`; shared code (the `Ensure` enum, `SystemParametersInfoW` interop) is in
-  `Common.psm1`, which each resource loads with `using module .\Common.psm1`. DSC discovers
-  class resources in nested modules (checked in winget's host). To add a resource, add both
-  manifest entries. Everything else in `dsc/` is Gallery modules winget downloaded
-  (git-ignored).
+- `configure.ps1` (stage 2, PowerShell 7): puts `<repo>\dsc` on `PSModulePath`, applies
+  `configuration/windows.dsc.yaml` with `dsc config set --output-format json`
+  (`Invoke-DscConfiguration`: stdout is parsed into a changed/unchanged summary, stderr traces go
+  to the console), then matching hardware profiles (`configuration/hardware.psd1`), then the
+  workloads (`configuration/workloads.psd1` + `configuration/workloads/*.dsc.yaml`;
+  `Resolve-Workloads` orders them by `Requires`), then sets up WSL 2, the distro, and uv +
+  Ansible inside it. Programs are run through `Invoke-Native` (console passthrough, or
+  `-Capture` / `-CaptureStdout`, `-InputText`, `-TimeoutSeconds`). Dot-sourcing it
+  (`. .\configure.ps1`) only defines the functions, so they can be tested directly in `pwsh`
+  without admin.
+- `dsc/WindowsSetup.<Name>/`: our own class-based DSC resources, **one single-file module per
+  resource** (`WindowsSetup.<Name>.psd1` with `RootModule` = the `.psm1` holding the class, and
+  `DscResourcesToExport`). Resource type names are `WindowsSetup.<Name>/<Name>`. Shared code (the
+  `Ensure` enum, `SystemParametersInfoW` interop) is the `WindowsSetup.Common` module, loaded with
+  `using module WindowsSetup.Common` (so it must be on PSModulePath even to parse-check). See
+  "DSC v3" below for why they're split up.
 - `install.ps1`: the README's one-liner (`irm .../install.ps1 | iex`). Resolves a ref to a commit
   via the GitHub API, caches the extracted zip in `%LOCALAPPDATA%\windows-setup\<sha>`, runs
   its `bootstrap.ps1`. Must stay 5.1-compatible, keep everything inside its `& { } @args`
@@ -92,9 +95,9 @@ Gotchas:
 
   Diagnose by loading the DLL (`LoadLibraryEx` gives error 127 = procedure not found) and
   checking its imports with `GetProcAddress`. The fix is the latest cumulative update
-  (KB5066791, October 2025, the last free one for Windows 10 22H2). It was downloaded but not
-  installed; the user was told. Until that's installed, use `-SkipWsl` for routine runs. If WSL
-  must be exercised, stop the `msrdc.exe` processes it leaves behind afterwards, elevated
+  (KB5066791, October 2025, the last free one for Windows 10 22H2). The user installed it on
+  2026-09-19 (build 19045.6456), but WSLg hasn't been re-checked since; until it has, use
+  `-SkipWsl` for routine runs. If WSL must be exercised, stop the `msrdc.exe` processes it leaves behind afterwards, elevated
   (`taskkill /F /PID ...`; wslservice launches them, so unelevated gets Access denied), and tell
   the user.
 - **Redirected runs aren't interactive.** The distro install (`wsl --install -d ...`) prompts for
@@ -113,48 +116,80 @@ Gotchas:
   installs Scoop somewhere else, also back up and restore that file, not just `PATH` and the
   `SCOOP` variable. Check with `scoop config root_path` (unset = default `~\scoop`).
 - **Faking failures for tests:** `bootstrap.ps1` and `configure.ps1` can both be dot-sourced to
-  just define their functions. Their paths are script variables, so point `$ConfigurePolicyKey` /
-  `$VCRedistKey` at a scratch key under `HKCU:` (and remove it afterwards). In PowerShell a
-  function beats an executable of the same name, so `function winget.exe { ... }` stands in for
-  winget (setting `$global:LASTEXITCODE`) to exercise the "configure disabled" paths. The
-  `winget configure` guards, retries, preflight and PATH checks borrow ideas from
+  just define their functions. Their paths are script variables, so point `$VCRedistKey` at a
+  scratch key under `HKCU:` (and remove it afterwards). In PowerShell a function beats an
+  executable of the same name, so `function winget.exe { ... }` stands in for winget (setting
+  `$global:LASTEXITCODE`). The retries, preflight and PATH checks borrow ideas from
   microsoft/WindowsDeveloperConfig's `src/Workloads/_common` (MIT). Its scripts weren't vendored
-  because they're tied to that repo's CI and Command Palette tooling.
+  because they're tied to that repo's CI and Command Palette tooling. A clone of that repo may
+  be at `C:\Users\cstrahan\src\WindowsDeveloperConfig`; the workloads were adapted from its
+  `src/Workloads/<name>/configuration.winget`.
 - **Unelevated checks you can run directly:**
   - `pwsh -File <test script>` that dot-sources `configure.ps1`, then calls its functions
-    (`Get-Hardware`, `Test-HardwareProfile` with faked hardware, `Invoke-Native`, the WSL
-    queries).
+    (`Get-Hardware`, `Test-HardwareProfile` with faked hardware, `Invoke-Native`,
+    `Resolve-Workloads`, `Invoke-DscConfiguration` on a throwaway HKCU-only config under `logs/`,
+    the WSL queries).
   - `[Management.Automation.Language.Parser]::ParseFile(...)` for syntax.
-  - `winget configure validate --file configuration\windows.dsc.yaml --module-path %CD%\dsc`
-    checks the config file. It exits 1 with "found locally, but could not be found in any
-    configured catalog" for each `WindowsSetupDsc` unit; that's expected for local modules.
-    `winget configure test` needs elevation because of `securityContext: elevated`.
+  - With `$env:PSModulePath = "$PWD\dsc;$env:PSModulePath"`: `dsc config test --file <config>
+    --output-format json` (per-resource `inDesiredState` / `differingProperties`),
+    `dsc config set --what-if`, and `dsc resource list 'WindowsSetup.*' --adapter
+    Microsoft.Adapter/PowerShell` (discovery). The workloads and hardware profile test fine
+    unelevated; `windows.dsc.yaml` fails because `WindowsCapability`'s DISM calls need admin.
   - Feature state without admin: `Get-CimInstance Win32_OptionalFeature` (InstallState 1 = enabled).
   - Pending servicing reboot: `Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'`.
-- **winget configure failures:** the console only shows the error message. Full stack traces
-  are in `%LOCALAPPDATA%\Packages\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\LocalState\DiagOutputDir\WinGet-*.log`
-  (search for `[CONF]`). DSC modules winget downloads are in
-  `%LOCALAPPDATA%\Microsoft\WinGet\Configuration\Modules`, so you can read a resource's source there.
-- **winget's DSC host is its own PowerShell 7.2.8**, built into `ConfigurationRemotingServer.exe`
-  in the App Installer package. It is neither Windows PowerShell 5.1 nor any installed pwsh.
-  - Windows 10's `Dism` module loads natively there, but every call throws
-    `COMException: Class not registered`. `ComputerManagementDsc/WindowsCapability` turns that
-    into a misleading "capability not found". Use `Import-Module Dism -UseWindowsPowerShell`
-    (as `WindowsSetupDsc` does); other Windows-only modules may need the same.
-  - The elevated server (`securityContext: elevated`) does **not** inherit `PSModulePath`, but it
-    does get `--module-path`, which is how `configure.ps1` makes `dsc/` visible.
+- **DSC v3 (dsc 3.2.3, the `Microsoft.DSC` MSIX from winget; switched from `winget configure` on
+  2026-09-19).** Measured quirks:
+  - **dsc does not test before set.** Both `PowerShellScript` and adapted class resources ran
+    Set even when Test returned true. Every class `Set()` starts with `if ($this.Test()) { return }`,
+    and every `setScript` re-checks before acting.
+  - **`PowerShellScript`** (`Microsoft.DSC.Transitional`): `testScript` must output exactly one
+    `[bool]`; with `input`, every script needs exactly one `param($X)`; it runs with
+    `$ErrorActionPreference = 'Stop'`. The set result counts `output` as changed unless the
+    get and set outputs are equal, so use `getScript: 'return'` (outputs `[]`; `'$null'` outputs
+    `[null]`) and have `setScript` print only when it changes something. The summary shows those
+    lines.
+  - **The PowerShell adapter only finds classes in a module's root `.psm1`.**
+    `psDscAdapter.psm1` calls `$Resources.AddRange(...)` on a function's returned List, which
+    PowerShell unrolls (empty → `$null`, one item → the bare object), so modules with
+    `NestedModules` fail discovery. Hence one module per resource. The adapter caches discovery
+    in `%LOCALAPPDATA%\dsc\PSAdapterCache*.json`; delete it (`[IO.File]::Delete`) after
+    renaming modules.
+  - Resources must not write to stdout: the adapter talks to dsc over it. Capture native output,
+    or use `Start-Process -Wait`.
+  - **`Microsoft.Windows/FeatureOnDemandList` (`dism_dsc`) refuses to run from the MSIX install**
+    ("This resource currently is not supported when installed via Appx"), which is the only way
+    winget ships dsc. Hence our `WindowsSetup.WindowsCapability`. Other `Microsoft.Windows/*`
+    resources (`Registry`, `Service`) worked. Check new built-in resources for this.
+  - dsc runs in its own package context: its AppData and HKCU writes land in the real
+    locations even when launched from Claude's sandboxed shell.
+  - `Microsoft.WinGet/Package` and the other `Microsoft.WinGet/*` resources ship with App
+    Installer (listed from its `WindowsApps` folder), not with dsc; `Initialize-Dsc` checks for them.
+  - `dependsOn` syntax: `"[resourceId('Type/Name', 'name')]"`.
   - A class-based module is only discoverable if `Get-Module -ListAvailable` shows its
     `ExportedDscResources`. That list comes back empty when the manifest has
-    `FunctionsToExport = @()`, so use `'*'`. Discovery failures show up only as "The
-    configuration unit could not be found" (`FindDscResourceNotFoundException` in the log).
-- **winget and the Gallery's `Microsoft.WinGet.DSC` must match.** winget always downloads the
-  latest module, and winget 1.9's host (PowerShell 7.2 / .NET 6) can't load it: "Loading the
-  module for the configuration unit failed", with `System.Runtime, Version=8.0.0.0` in the log.
-  That's why `bootstrap.ps1` upgrades `Microsoft.AppInstaller` first. When winget upgrades
-  itself, the old process exits with `0x80004004` (E_ABORT), and for a few seconds afterwards
-  launching `winget` fails with `WinError 1920`, hence the retry in `Get-WingetVersion`.
-- **winget 1.29's output format** differs from 1.9's: units are listed as `Name [id]` and results
-  as "Unit successfully applied." When filtering logs, match on those.
+    `FunctionsToExport = @()`, so use `'*'`.
+- **Windows 10's `Dism` module under PowerShell 7:** in winget's old configuration host (its own
+  PowerShell 7.2.8) every call threw `COMException: Class not registered`. `WindowsCapability`
+  loads it with `Import-Module Dism -UseWindowsPowerShell`; other Windows-only modules may need
+  the same.
+- **winget self-upgrade:** when winget upgrades itself, the old process exits with `0x80004004`
+  (E_ABORT), and for a few seconds afterwards launching `winget` fails with `WinError 1920`,
+  hence the retry in `Get-WingetVersion`.
+- **winget package IDs are case-sensitive with `--exact`** (and in `Microsoft.WinGet/Package`):
+  WindowsDeveloperConfig's `Microsoft.WinAppCLI` doesn't match `Microsoft.WinAppCli`. Check IDs
+  with `winget show --id <id> --exact --source winget`.
+- **Visual Studio Installer (`setup.exe modify`)**, measured 2026-09-19 with VS 2026 18.10:
+  - `--wait` is only a `vs_<edition>.exe` bootstrapper option; the installed `setup.exe` rejects
+    it with exit code 87 ("Option 'wait' is unknown"). `setup.exe` runs to completion anyway.
+  - **Unknown `--add` IDs are silently ignored** (exit 0). Hence `VisualStudioComponents`
+    re-tests after Set. Check IDs in `C:\ProgramData\Microsoft\VisualStudio\Packages\_Instances\<id>\catalog.json`
+    (`packages[].id`); e.g. VS 2026 has `Component.WindowsAppSdkSupport.CSharp`, not
+    WindowsDeveloperConfig's `ComponentGroup.WindowsAppSDK.Cs`.
+  - Logs: `%TEMP%\dd_setup_*.log` (+ `_errors.log`), `dd_installer_*.log`. Benign noise: canceled
+    channel-update requests (0x8013153b), "Didn't find any channel feed", "not applicable"
+    packages, and `Error 0x80070005: Could not sync DCAT registration` (a TrustedInstaller-owned
+    Windows Update key; only affects VS updates via Windows Update).
+  - Adding the C++ workload returned 3010 (restart to finish); the resource warns.
 - **Installer logs** for packages winget installs are next to winget's own logs in
   `DiagOutputDir` (e.g. `Git.Git.<version>-<timestamp>.log`), and include the full installer
   command line. Check there first when a package fails with a generic `InstallError`.
@@ -162,9 +197,10 @@ Gotchas:
   `GitForWindows` checks for this first and names the processes. Don't kill the user's
   processes; ask them to close them. The Claude app's shells set `GIT_EDITOR=true`, so `git var
   GIT_EDITOR` isn't meaningful from here; use `git config --show-origin --get core.editor`.
-- **Resource warnings are lost.** `Write-Warning`/`Write-Verbose` from a DSC resource shows up
-  neither in winget's console output nor in its log. Anything the user must see has to be
-  printed by `configure.ps1` (e.g. a hardware profile's `note`).
+- **Resource warnings:** under `winget configure`, `Write-Warning` from a resource was lost.
+  Under dsc, adapter and script warnings reach stderr as `WARN` traces, which `configure.ps1`
+  passes to the console, but keep anything the user must act on in `configure.ps1` output
+  (e.g. a hardware profile's `note`).
 - **Precision touchpad settings** (`HKCU\...\PrecisionTouchPad`) can't be applied live on
   Windows 10: restarting the touchpad collection, its parent I2C HID device, or Explorer all
   failed; signing out and in worked. `SPI_GET/SETTOUCHPADPARAMETERS` exists only from
@@ -177,8 +213,8 @@ Gotchas:
     `CursorSpeed` is 2 × the Windows 10 slider, and `ScrollDirection = 0xFFFFFFFF` means "Down motion
     scrolls down". The SPI path (Windows 11 24H2+) follows Microsoft's `TOUCHPAD_PARAMETERS_V1`
     docs and hasn't been run on real hardware.
-  - Test it unelevated with throwaway configs under `logs/` and `winget configure test` (exit 0 =
-    in the desired state), and restore the original values afterwards.
+  - Test it unelevated with throwaway configs under `logs/` and `dsc config test`, and restore
+    the original values afterwards.
 - **Keyboard:** `Scancode Map` (HKLM) is global to all keyboards and read at boot (Microsoft
   documents both; per-keyboard remapping needs a third-party filter driver). `configure.ps1`
   prints a restart note when it changes. For repeat settings, the live values
@@ -189,16 +225,14 @@ Gotchas:
   next poll (8+ hours later); the event log shows it (`Power-Troubleshooter` 1 = resume,
   `Time-Service` 35/37 = sync). Hence the `\windows-setup\Resync time` task. Tasks running as
   SYSTEM are invisible to unelevated queries (`Get-ScheduledTask` says not found, and
-  `winget configure test` reports drift), so inspect or test them elevated, e.g.
+  `dsc config test` reports drift), so inspect or test them elevated, e.g.
   `schtasks /query /tn ... /xml`. Task Scheduler's defaults skip tasks on battery; set
   `AllowStartIfOnBatteries`/`DontStopIfGoingOnBatteries` for anything a laptop needs.
 - **PowerShell hashtable member access can hit methods:** `$h.Clear` is `Hashtable.Clear()`, not
   the `Clear` key. Use `$h['Key']` for keys that might collide with members.
-- **Probing winget's host without UAC:** write a throwaway config under `logs/` with a
-  `PSDscResources/Script` unit whose `TestScript` writes diagnostics to a file and returns
-  `$true`. Leave out `securityContext: elevated` and it runs unelevated with no UAC prompt, so
-  you can run `winget configure --file logs\x.dsc.yaml --accept-configuration-agreements
-  --disable-interactivity` directly. Add the directive only for things that need admin.
+- **Probing dsc without UAC:** write a throwaway config under `logs/` with a
+  `Microsoft.DSC.Transitional/PowerShellScript` resource whose scripts write diagnostics, and run
+  `dsc config set --file logs\x.dsc.yaml --output-format json` directly from your shell.
 - **`wsl.exe` output** is UTF-16LE unless `WSL_UTF8=1` is set; `configure.ps1` handles both.
 
 ## Future directions
@@ -266,3 +300,8 @@ started-elevated case, measured on 2026-09-18 but not built:
 - 2026-09-18: App Installer upgraded 1.24 → 1.29 (winget 1.9 → 1.29.290) and Git 2.33.0.2 →
   2.55.0.3 by this configuration. VS Code (user scope) and Windows Terminal 1.21 were already
   installed. A full `-SkipWsl` re-run takes about 15 seconds and changes nothing.
+- 2026-09-19: switched to DSC v3; the new registry tweaks applied, and all nine workloads were
+  installed (VS 2026 Community 18.10.1 with NativeDesktop, ManagedDesktop, Universal; .NET 10
+  SDK, OpenJDK 25, Python 3.14, Node LTS + tsc, rustup/stable 1.98.1 — `cargo run` links fine).
+  The VS C++ modify asked for a restart (3010). A full `-SkipWsl` re-run with workloads changes
+  nothing.

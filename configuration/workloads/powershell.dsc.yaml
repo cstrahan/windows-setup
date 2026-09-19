@@ -1,0 +1,112 @@
+# PowerShell development in VS Code (from microsoft/WindowsDeveloperConfig's powershell workload).
+# PowerShell 7 comes from bootstrap.ps1 and VS Code from the base configuration.
+#
+# Differences from theirs: extensions are installed with `code --install-extension` instead of the
+# prerelease Microsoft.VSCode.Dsc module, and settings.json is only edited if it has no comments
+# (round-tripping JSON would silently drop them); otherwise this warns and leaves it alone.
+#
+# PowerShellScript steps: DSC v3 runs setScript without testing first, so each setScript starts
+# by running the test itself. getScript outputs nothing (`return`, not `'$null'`, which
+# is output [null]), so a set that prints nothing matches it and reports no change.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  - name: vscodeExtensions
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    properties:
+      input:
+        - ms-vscode.powershell   # PowerShell language support
+        - pspester.pester-test   # Pester test explorer
+      getScript: |
+        param($Extensions)
+        return
+      testScript: |
+        param($Extensions)
+        $env:Path = ([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User') | Where-Object { $_ }) -join ';'
+        if (-not (Get-Command code -ErrorAction SilentlyContinue)) { return $false }
+        $installed = @(& code --list-extensions 2>$null)
+        -not @($Extensions | Where-Object { $_ -notin $installed })
+      setScript: |
+        param($Extensions)
+        $env:Path = ([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User') | Where-Object { $_ }) -join ';'
+        if (-not (Get-Command code -ErrorAction SilentlyContinue)) { throw 'VS Code (code) is not on PATH' }
+        $installed = @(& code --list-extensions 2>$null)
+        foreach ($extension in $Extensions | Where-Object { $_ -notin $installed }) {
+            $output = & code --install-extension $extension 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "code --install-extension $extension failed ($LASTEXITCODE): $($output -join ' ')" }
+            "installed $extension"
+        }
+
+  # PSScriptAnalyzer rules for the PowerShell extension, from
+  # https://learn.microsoft.com/powershell/utility-modules/psscriptanalyzer/rules-recommendations
+  - name: psScriptAnalyzerSettings
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    dependsOn:
+      - "[resourceId('Microsoft.DSC.Transitional/PowerShellScript', 'vscodeExtensions')]"
+    properties:
+      input:
+        - PSAvoidDefaultValueSwitchParameter
+        - PSAvoidGlobalVars
+        - PSAvoidUsingCmdletAliases
+        - PSAvoidUsingComputerNameHardcoded
+        - PSAvoidUsingConvertToSecureStringWithPlainText
+        - PSAvoidUsingEmptyCatchBlock
+        - PSAvoidUsingInvokeExpression
+        - PSAvoidUsingPlainTextForPassword
+        - PSAvoidUsingPositionalParameters
+        - PSAvoidUsingUsernameAndPasswordParams
+        - PSAvoidUsingWMICmdlet
+        - PSAvoidUsingWriteHost
+        - PSDSCDscExamplesPresent
+        - PSDSCDscTestsPresent
+        - PSDSCReturnCorrectTypesForDSCFunctions
+        - PSDSCStandardDSCFunctionsInResource
+        - PSDSCUseIdenticalMandatoryParametersForDSC
+        - PSDSCUseIdenticalParametersForDSC
+        - PSMissingModuleManifestField
+        - PSProvideCommentHelp
+        - PSReservedCmdletChar
+        - PSReservedParams
+        - PSShouldProcess
+        - PSUseApprovedVerbs
+        - PSUseCmdletCorrectly
+        - PSUseDeclaredVarsMoreThanAssignments
+        - PSUsePSCredentialType
+        - PSUseShouldProcessForStateChangingFunctions
+        - PSUseSingularNouns
+        - PSUseSupportsShouldProcess
+      getScript: |
+        param($Rules)
+        return
+      testScript: |
+        param($Rules)
+        $userDir = Join-Path $env:APPDATA 'Code\User'
+        $analyzerPath = Join-Path $userDir 'PSScriptAnalyzerSettings.psd1'
+        $settingsPath = Join-Path $userDir 'settings.json'
+        if (-not (Test-Path $analyzerPath) -or -not (Test-Path $settingsPath)) { return $false }
+        $analyzer = Import-PowerShellDataFile $analyzerPath
+        if ($analyzer.IncludeDefaultRules -ne $true -or @($Rules | Where-Object { $_ -notin $analyzer.IncludeRules })) { return $false }
+        try { $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json -AsHashtable } catch { return $false }
+        ($null -ne $settings) -and ($settings['powershell.scriptAnalysis.enable'] -eq $true) -and ($settings['powershell.scriptAnalysis.settingsPath'] -eq $analyzerPath)
+      setScript: |
+        param($Rules)
+        $userDir = Join-Path $env:APPDATA 'Code\User'
+        New-Item -ItemType Directory -Path $userDir -Force | Out-Null
+        $analyzerPath = Join-Path $userDir 'PSScriptAnalyzerSettings.psd1'
+        $settingsPath = Join-Path $userDir 'settings.json'
+        $analyzer = "@{`n    IncludeDefaultRules = `$true`n    IncludeRules = @(`n" + (($Rules | ForEach-Object { "        '$_'" }) -join "`n") + "`n    )`n}`n"
+        $current = if (Test-Path $analyzerPath) { [IO.File]::ReadAllText($analyzerPath) } else { '' }
+        if ($current -ne $analyzer) {
+            [IO.File]::WriteAllText($analyzerPath, $analyzer, [Text.UTF8Encoding]::new($false))
+            "wrote $analyzerPath"
+        }
+        $raw = if (Test-Path $settingsPath) { [IO.File]::ReadAllText($settingsPath) } else { '{}' }
+        $settings = if ($raw.Trim()) { $raw | ConvertFrom-Json -AsHashtable } else { [ordered]@{} }
+        if ($settings['powershell.scriptAnalysis.enable'] -eq $true -and $settings['powershell.scriptAnalysis.settingsPath'] -eq $analyzerPath) { return }
+        if ($raw -match '(?m)^\s*//|/\*') {
+            Write-Warning "VS Code's settings.json has comments, which rewriting would drop; add these by hand: `"powershell.scriptAnalysis.enable`": true, `"powershell.scriptAnalysis.settingsPath`": `"$($analyzerPath -replace '\\', '\\')`""
+            return
+        }
+        $settings['powershell.scriptAnalysis.enable'] = $true
+        $settings['powershell.scriptAnalysis.settingsPath'] = $analyzerPath
+        [IO.File]::WriteAllText($settingsPath, ($settings | ConvertTo-Json -Depth 100), [Text.UTF8Encoding]::new($false))
+        "updated $settingsPath"

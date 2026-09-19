@@ -1,0 +1,9 @@
+# .NET 10 SDK (from microsoft/WindowsDeveloperConfig's dotnet workload).
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  - name: dotnetSdk
+    type: Microsoft.WinGet/Package
+    properties:
+      id: Microsoft.DotNet.SDK.10
+      source: winget
+      acceptAgreements: true

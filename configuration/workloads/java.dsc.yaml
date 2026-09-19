@@ -1,0 +1,9 @@
+# Microsoft Build of OpenJDK 25 (from microsoft/WindowsDeveloperConfig's java workload).
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  - name: openJdk
+    type: Microsoft.WinGet/Package
+    properties:
+      id: Microsoft.OpenJDK.25
+      source: winget
+      acceptAgreements: true

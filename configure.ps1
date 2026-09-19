@@ -4,14 +4,21 @@
 Stage 2 of the windows-setup bootstrap, run by bootstrap.ps1 in PowerShell 7.
 
 .DESCRIPTION
-Applies configuration\windows.dsc.yaml with winget configure, then any matching hardware
-profiles (configuration\hardware.psd1), then sets up WSL 2 with uv and Ansible inside it.
+Applies configuration\windows.dsc.yaml with DSC v3 (dsc.exe), then any matching hardware
+profiles (configuration\hardware.psd1), then the enabled workloads (configuration\workloads.psd1),
+then sets up WSL 2 with uv and Ansible inside it.
 
 Every step checks current state before acting, so this is safe to re-run. Some steps (enabling
 WSL) need a restart; then it exits with 3010 and should be run again after restarting.
 
-.PARAMETER SkipWinget
-Don't apply the winget configuration or hardware profiles.
+.PARAMETER SkipDsc
+Don't apply the DSC configurations (base, hardware profiles, workloads).
+
+.PARAMETER Workloads
+Apply these workloads (plus what they require) instead of workloads.psd1's Enabled list.
+
+.PARAMETER SkipWorkloads
+Apply the base configuration and hardware profiles, but no workloads.
 
 .PARAMETER SkipWsl
 Don't set up WSL, or uv and Ansible inside it.
@@ -21,7 +28,9 @@ The WSL distribution. Defaults to Ubuntu, which tracks the latest Ubuntu LTS.
 #>
 [CmdletBinding()]
 param(
-    [switch] $SkipWinget,
+    [Alias('SkipWinget')] [switch] $SkipDsc,
+    [string[]] $Workloads,
+    [switch] $SkipWorkloads,
     [switch] $SkipWsl,
     [string] $Distro = 'Ubuntu'
 )
@@ -30,11 +39,13 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $Root = $PSScriptRoot
-$WingetConfig = Join-Path $Root 'configuration\windows.dsc.yaml'
-# Extra winget configurations applied only on matching hardware.
+$BaseConfig = Join-Path $Root 'configuration\windows.dsc.yaml'
+# Extra configurations applied only on matching hardware.
 $HardwareProfiles = Join-Path $Root 'configuration\hardware.psd1'
-# Our own DSC modules (WindowsSetupDsc). Passed as winget's --module-path, so modules winget
-# downloads from the PowerShell Gallery also land here (they're git-ignored).
+# Optional toolchains, each its own configuration.
+$WorkloadList = Join-Path $Root 'configuration\workloads.psd1'
+# Our own class-based DSC resources, one module each (WindowsSetup.*). dsc's PowerShell adapter
+# finds them through PSModulePath, which dsc inherits from this process.
 $DscModules = Join-Path $Root 'dsc'
 
 $AnsibleCoreSpec = 'ansible-core>=2.19'
@@ -44,8 +55,9 @@ $ScancodeMapKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layout'
 $CbsRebootPendingKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
 $WslFeatures = 'Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform'
 $WslProbeTimeout = 60  # seconds; a healthy `wsl --status` returns in well under this
-# Commands the winget stage (plus bootstrap.ps1's Scoop) should leave on PATH; checked afterwards.
-$ExpectedCommands = 'git', 'go', 'uv', 'code', 'scoop'
+# Commands the base configuration (plus bootstrap.ps1's Scoop) should leave on PATH; checked
+# afterwards, along with the applied workloads' Commands.
+$ExpectedCommands = [System.Collections.Generic.List[string]] @('git', 'go', 'uv', 'code', 'scoop')
 $WslResetTimeout = 120
 
 # Ask wsl.exe for UTF-8 output instead of UTF-16LE (older builds ignore it; see Invoke-Native).
@@ -61,7 +73,8 @@ function Write-Step([string] $Message) {
 
 # Runs a program. By default its output goes straight to the console (so interactive prompts
 # work) and a non-zero exit code throws. -Capture collects stdout and stderr instead, decoding
-# UTF-16LE (wsl.exe without WSL_UTF8) or UTF-8. -InputText is sent to stdin with LF line endings.
+# UTF-16LE (wsl.exe without WSL_UTF8) or UTF-8; -CaptureStdout collects only stdout, leaving
+# stderr (progress, warnings) on the console. -InputText is sent to stdin with LF line endings.
 # With -TimeoutSeconds the program is killed after that long; ExitCode is then $null.
 # Returns [pscustomobject]@{ ExitCode; Output }.
 function Invoke-Native {
@@ -70,30 +83,28 @@ function Invoke-Native {
         [Parameter(Mandatory, Position = 0)] [string] $FilePath,
         [Parameter(Position = 1)] [string[]] $ArgumentList = @(),
         [switch] $Capture,
+        [switch] $CaptureStdout,
         [string] $InputText,
         [int] $TimeoutSeconds = 0,
         [switch] $AllowFailure
     )
     $commandLine = (@($FilePath) + $ArgumentList) -join ' '
-    if (-not $Capture) {
+    if (-not $Capture -and -not $CaptureStdout) {
         Write-Host "  `$ $commandLine"
     }
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new($FilePath)
     foreach ($argument in $ArgumentList) { $startInfo.ArgumentList.Add($argument) }
     $startInfo.UseShellExecute = $false
-    $startInfo.RedirectStandardOutput = $Capture
+    $startInfo.RedirectStandardOutput = $Capture -or $CaptureStdout
     $startInfo.RedirectStandardError = $Capture
     $startInfo.RedirectStandardInput = $PSBoundParameters.ContainsKey('InputText')
 
     $process = [System.Diagnostics.Process]::Start($startInfo)
-    if ($Capture) {
-        $stdout = [System.IO.MemoryStream]::new()
-        $stderr = [System.IO.MemoryStream]::new()
-        $copies = [System.Threading.Tasks.Task[]] @(
-            $process.StandardOutput.BaseStream.CopyToAsync($stdout)
-            $process.StandardError.BaseStream.CopyToAsync($stderr)
-        )
-    }
+    $stdout = [System.IO.MemoryStream]::new()
+    $stderr = [System.IO.MemoryStream]::new()
+    $copies = [System.Collections.Generic.List[System.Threading.Tasks.Task]]::new()
+    if ($startInfo.RedirectStandardOutput) { $copies.Add($process.StandardOutput.BaseStream.CopyToAsync($stdout)) }
+    if ($startInfo.RedirectStandardError) { $copies.Add($process.StandardError.BaseStream.CopyToAsync($stderr)) }
     if ($startInfo.RedirectStandardInput) {
         # (Not inline: inside a method call's parentheses, -replace's comma separates arguments.)
         $text = $InputText -replace "`r`n", "`n"
@@ -108,8 +119,8 @@ function Invoke-Native {
     }
     $process.WaitForExit()  # also waits for the output to be fully read
     $output = ''
-    if ($Capture) {
-        [System.Threading.Tasks.Task]::WaitAll($copies)
+    if ($copies.Count) {
+        [System.Threading.Tasks.Task]::WaitAll($copies.ToArray())
         $output = (ConvertFrom-NativeOutput $stdout.ToArray()) + (ConvertFrom-NativeOutput $stderr.ToArray())
     }
     if ($process.ExitCode -ne 0 -and -not $AllowFailure) {
@@ -175,7 +186,7 @@ function Update-SessionPath {
     }
 }
 
-# Post-condition for the winget stage: what it installed should now be usable.
+# Post-condition for the DSC stage: what it installed should now be usable.
 function Assert-ExpectedCommands {
     Update-SessionPath
     $missing = @($ExpectedCommands | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
@@ -185,17 +196,101 @@ function Assert-ExpectedCommands {
     Write-Step "On PATH: $($ExpectedCommands -join ', ')"
 }
 
-# --- winget configuration --------------------------------------------------------------
+# --- DSC configurations ----------------------------------------------------------------
 
-function Invoke-WingetConfiguration([string] $Path) {
-    Write-Step "Applying winget configuration $([System.IO.Path]::GetRelativePath($Root, $Path))"
-    # PSModulePath isn't inherited by winget's elevated configuration server; --module-path is.
-    # --nowarn drops the legal disclaimer winget prints despite --accept-configuration-agreements,
-    # and --suppress-initial-details the up-front dump of every unit's module and settings.
-    # Failures are still reported in full.
-    Invoke-Native winget.exe @('configure', '--file', $Path, '--module-path', $DscModules,
-        '--accept-configuration-agreements', '--disable-interactivity',
-        '--nowarn', '--suppress-initial-details') | Out-Null
+# Makes our modules visible to dsc's PowerShell adapter, which dsc starts with this environment.
+function Initialize-DscModulePath {
+    if (-not (Get-Command dsc.exe -ErrorAction SilentlyContinue)) {
+        throw 'dsc.exe (Microsoft.DSC) is not on PATH; bootstrap.ps1 installs it'
+    }
+    if (($env:PSModulePath -split ';') -notcontains $DscModules) {
+        $env:PSModulePath = "$DscModules;$env:PSModulePath"
+    }
+}
+
+# Flattens dsc's per-resource results (Microsoft.DSC/Group nests its members' results).
+function Get-DscResults($Results) {
+    foreach ($entry in @($Results)) {
+        if ($entry.result.PSObject.Properties['results']) {
+            Get-DscResults $entry.result.results
+        } else {
+            $entry
+        }
+    }
+}
+
+# One line per changed resource, then a count of the unchanged ones. PowerShellScript steps also
+# show what their setScript printed.
+function Write-DscReport($Report) {
+    $unchanged = 0
+    foreach ($entry in Get-DscResults $Report.results) {
+        $changed = @($entry.result.PSObject.Properties['changedProperties'] ? $entry.result.changedProperties : @()) |
+            Where-Object { $_ }
+        if (-not $changed) { $unchanged++; continue }
+        Write-Host "  changed: $($entry.name) ($($entry.type)): $($changed -join ', ')"
+        $after = $entry.result.PSObject.Properties['afterState'] ? $entry.result.afterState : $null
+        if ($entry.type -like '*/PowerShellScript' -and $after -and $after.PSObject.Properties['output']) {
+            foreach ($line in @($after.output) | Where-Object { $_ }) { Write-Host "    $line" }
+        }
+    }
+    Write-Host "  unchanged: $unchanged resource(s)"
+    foreach ($message in @($Report.PSObject.Properties['messages'] ? $Report.messages : @()) | Where-Object { $_ }) {
+        Write-Host "  $($message.level): $($message.resourceName): $($message.message)"
+    }
+}
+
+# Applies one configuration document. dsc's traces, warnings and progress go to stderr, straight to
+# the console; its JSON result (stdout) becomes the summary.
+function Invoke-DscConfiguration([string] $Path) {
+    Write-Step "Applying $([System.IO.Path]::GetRelativePath($Root, $Path))"
+    $result = Invoke-Native dsc.exe @('config', 'set', '--file', $Path, '--output-format', 'json') -CaptureStdout -AllowFailure
+    $report = $null
+    if ($result.Output.Trim()) {
+        try { $report = $result.Output | ConvertFrom-Json } catch { Write-Host $result.Output }
+    }
+    if ($report) { Write-DscReport $report }
+    if ($result.ExitCode -ne 0 -or ($report -and $report.hadErrors)) {
+        throw "dsc config set failed for $([System.IO.Path]::GetFileName($Path)) (exit code $($result.ExitCode)); see the errors above"
+    }
+}
+
+# --- workloads -------------------------------------------------------------------------
+
+# The workloads to apply, each after the ones it Requires (depth-first), without duplicates.
+function Resolve-Workloads([hashtable] $Definitions, [string[]] $Names) {
+    $ordered = [System.Collections.Generic.List[string]]::new()
+    $inProgress = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $visit = {
+        param([string] $Name, [string[]] $Chain)
+        $Name = $Name.ToLowerInvariant()
+        if ($ordered.Contains($Name)) { return }
+        if (-not $Definitions.ContainsKey($Name)) {
+            throw "unknown workload '$Name' (known: $(($Definitions.Keys | Sort-Object) -join ', '))"
+        }
+        if (-not $inProgress.Add($Name)) { throw "workload cycle: $((@($Chain) + $Name) -join ' -> ')" }
+        foreach ($required in @($Definitions[$Name]['Requires'])) { & $visit $required (@($Chain) + $Name) }
+        $ordered.Add($Name)
+    }
+    foreach ($name in $Names) { & $visit $name @() }
+    return , $ordered.ToArray()
+}
+
+function Invoke-WorkloadConfiguration {
+    $list = Import-PowerShellDataFile -Path $WorkloadList
+    # From bootstrap.cmd, -Workloads a,b arrives as one argument, "a,b".
+    $names = if ($null -ne $Workloads) { @($Workloads -split ',' | ForEach-Object Trim | Where-Object { $_ }) } else { @($list.Enabled) }
+    $ordered = Resolve-Workloads $list.Workloads $names
+    if (-not $ordered) {
+        Write-Step 'No workloads enabled'
+        return
+    }
+    Write-Step "Workloads: $($ordered -join ', ')"
+    foreach ($name in $ordered) {
+        Invoke-DscConfiguration (Join-Path (Split-Path $WorkloadList) "workloads\$name.dsc.yaml")
+        foreach ($command in @($list.Workloads[$name]['Commands'])) {
+            if ($command -and -not $ExpectedCommands.Contains($command)) { $ExpectedCommands.Add($command) }
+        }
+    }
 }
 
 # Windows' keyboard remapping, as hex ('' if unset). It only takes effect after a restart.
@@ -238,7 +333,7 @@ function Invoke-HardwareConfiguration {
     foreach ($hardwareProfile in $profiles) {
         if (Test-HardwareProfile $hardwareProfile $hardware) {
             Write-Step "Hardware profile matches: $($hardwareProfile.Name)"
-            Invoke-WingetConfiguration (Join-Path (Split-Path $HardwareProfiles) $hardwareProfile.Config)
+            Invoke-DscConfiguration (Join-Path (Split-Path $HardwareProfiles) $hardwareProfile.Config)
             if ($hardwareProfile.ContainsKey('Note')) {
                 Write-Step "Note: $($hardwareProfile.Note)"
             }
@@ -385,18 +480,38 @@ ansible --version
 
 # --- main ------------------------------------------------------------------------------
 
+# Two runs at once would race on winget, dsc and installers. The mutex is held until this process
+# exits (an abandoned one, from a killed run, counts as acquired). (Idea from
+# microsoft/WindowsDeveloperConfig's dev-config.ps1.)
+function Enter-SingleInstance {
+    $script:InstanceMutex = [System.Threading.Mutex]::new($false, 'Global\windows-setup-configure')
+    try {
+        $acquired = $script:InstanceMutex.WaitOne(0)
+    } catch [System.Threading.AbandonedMutexException] {
+        $acquired = $true
+    }
+    if (-not $acquired) {
+        throw 'another windows-setup run is already in progress; wait for it to finish'
+    }
+}
+
 function Invoke-Configure {
     if (-not (Test-Administrator)) {
         throw 'must run elevated (use bootstrap.cmd, which elevates for you)'
     }
+    Enter-SingleInstance
     Write-Preflight
-    if (-not $SkipWinget) {
+    if (-not $SkipDsc) {
+        Initialize-DscModulePath
         $scancodeMap = Get-ScancodeMap
-        Invoke-WingetConfiguration $WingetConfig
+        Invoke-DscConfiguration $BaseConfig
         if ((Get-ScancodeMap) -ne $scancodeMap) {
             Write-Step 'Note: the keyboard remapping (Scancode Map) changed; it takes effect after a restart.'
         }
         Invoke-HardwareConfiguration
+        if (-not $SkipWorkloads) {
+            Invoke-WorkloadConfiguration
+        }
         Assert-ExpectedCommands
     }
     if (-not $SkipWsl) {

@@ -1,6 +1,6 @@
 # KeyboardRepeat: per-user keyboard repeat delay and rate.
 
-using module .\Common.psm1
+using module WindowsSetup.Common
 
 # Setting name -> SPI_GET*/SPI_SET* actions, its value under HKCU\Control Panel\Keyboard (a
 # string), and its valid range.
@@ -85,6 +85,7 @@ class KeyboardRepeat {
     }
 
     [void] Set() {
+        if ($this.Test()) { return }  # DSC v3 calls Set() without testing first
         $desired = Get-KeyboardRepeatDesired $this
         foreach ($name in $desired.Keys) {
             Set-KeyboardRepeatSetting $name $desired[$name]

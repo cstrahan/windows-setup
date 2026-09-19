@@ -1,6 +1,6 @@
-# Shared by WindowsSetupDsc's resources (see WindowsSetupDsc.psd1). Each resource module pulls
-# this in with `using module .\Common.psm1`. winget configure runs these resources in its own
-# embedded PowerShell 7 host.
+# Shared by the WindowsSetup.* DSC resource modules, which load it with
+# `using module WindowsSetup.Common`. DSC v3 runs them through its PowerShell adapter
+# (Microsoft.Adapter/PowerShell), in the installed PowerShell 7.
 
 enum Ensure {
     Absent

@@ -1,8 +1,10 @@
-# WindowsCapability: installs or removes a Windows capability (Feature on Demand).
+# WindowsCapability: installs or removes a Windows capability (Feature on Demand). DSC v3's own
+# Microsoft.Windows/FeatureOnDemandList refuses to run from the MSIX install of DSC ("not supported
+# when installed via Appx"), which is how winget installs it.
 
-using module .\Common.psm1
+using module WindowsSetup.Common
 
-# On Windows 10 the Dism module fails natively under PowerShell 7 ("Class not registered"),
+# On Windows 10 the Dism module fails natively under PowerShell 7 (seen in winget's host) ("Class not registered"),
 # so load it through the Windows PowerShell 5.1 compatibility layer instead.
 function Import-CompatDism {
     $loaded = Get-Module Dism
@@ -52,6 +54,7 @@ class WindowsCapability {
     }
 
     [void] Set() {
+        if ($this.Test()) { return }  # DSC v3 calls Set() without testing first
         Import-CompatDism
         if ($this.Ensure -eq [Ensure]::Present) {
             Add-WindowsCapability -Online -Name $this.Name -ErrorAction Stop | Out-Null

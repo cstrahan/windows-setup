@@ -1,18 +1,13 @@
-# yaml-language-server: $schema=https://aka.ms/configuration-dsc-schema/0.2
-#
-# System76 Gazelle (gaze16). Applied by configure.ps1 when configuration\hardware.psd1 matches.
-properties:
-  configurationVersion: 0.2.0
-  resources:
-    # The ELAN0412 precision touchpad has dedicated left/right buttons, so turn off tapping,
-    # which is easy to trigger by accident. On Windows 10 this takes effect at the next sign-in.
-    - resource: WindowsSetupDsc/PrecisionTouchpad
-      id: touchpadNoTaps
-      directives:
-        description: 'Touchpad: turn off tap to click, two-finger tap to right-click, and tap-and-drag'
-        allowPrerelease: false
-      settings:
-        IsSingleInstance: "Yes"  # quoted: YAML would otherwise read it as a boolean
-        Taps: Disabled
-        TwoFingerTap: Disabled
-        TapAndDrag: Disabled
+# System76 Gazelle (gaze16), DSC v3. Applied by configure.ps1 when configuration\hardware.psd1
+# matches.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  # The ELAN0412 precision touchpad has dedicated left/right buttons, so turn off tapping,
+  # which is easy to trigger by accident. On Windows 10 this takes effect at the next sign-in.
+  - name: touchpadNoTaps
+    type: WindowsSetup.PrecisionTouchpad/PrecisionTouchpad
+    properties:
+      IsSingleInstance: "Yes"  # quoted: YAML would otherwise read it as a boolean
+      Taps: Disabled
+      TwoFingerTap: Disabled
+      TapAndDrag: Disabled

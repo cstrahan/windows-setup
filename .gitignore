@@ -1,6 +1,7 @@
 __pycache__/
 .venv/
 logs/
-# winget downloads PowerShell Gallery modules into dsc/ (its --module-path); only ours are tracked.
+# Only our own DSC modules are tracked. (Older versions ran winget configure with --module-path dsc,
+# which downloaded PowerShell Gallery modules here.)
 dsc/*
-!dsc/WindowsSetupDsc/
+!dsc/WindowsSetup.*/

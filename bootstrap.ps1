@@ -2,7 +2,7 @@
 # unelevated; it refuses to run otherwise. Two sections:
 # - unelevated: per-user installs that should belong to the user (Scoop)
 # - elevated (it relaunches itself with UAC): make sure winget works and is current, install or
-#   update PowerShell 7, then hand off to configure.ps1 (stage 2) in PowerShell 7.
+#   update DSC v3 and PowerShell 7, then hand off to configure.ps1 (stage 2) in PowerShell 7.
 # Safe to re-run; every step checks before acting.
 #
 # Any arguments are passed through to configure.ps1 (e.g. -SkipWsl, -Distro Debian).
@@ -12,10 +12,9 @@ Set-StrictMode -Version Latest
 
 $RebootRequiredExitCode = 3010
 $WingetUpdateNotApplicable = 0x8A15002B  # `winget upgrade`: already the latest version
-$MinWingetVersion = [version] '1.6'  # `winget configure` went GA in 1.6
+$MinWingetVersion = [version] '1.6'
 $Pwsh = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
 $VCRedistKey = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'
-$ConfigurePolicyKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller'
 # Scoop apps to install for the user, in the unelevated section.
 $ScoopApps = @('mise', 'neovim')
 $relaunched = $args -contains '--elevated-relaunch'
@@ -88,9 +87,8 @@ function Get-WingetVersion {
     }
 }
 
-# winget configure downloads the latest DSC modules from the PowerShell Gallery, and
-# Microsoft.WinGet.DSC only loads in the PowerShell host of a matching winget: e.g. winget 1.9
-# hosts PowerShell 7.2 (.NET 6), while current Microsoft.WinGet.DSC needs .NET 8.
+# A current winget matters beyond packages: App Installer also provides the Microsoft.WinGet/*
+# DSC v3 resources the configurations use.
 function Update-Winget {
     Write-Host '==> Ensuring winget is up to date'
     $before = Get-WingetVersion
@@ -119,11 +117,12 @@ function Get-RegistryValue([string] $Path, [string] $Name) {
     return $null
 }
 
-# `winget configure` depends on the Visual C++ 2015+ x64 runtime, which App Installer doesn't
-# always bring along (per microsoft/WindowsDeveloperConfig's enable-winget-configure.ps1).
+# winget's installer and configuration components use the Visual C++ 2015+ x64 runtime, which
+# App Installer doesn't always bring along (per microsoft/WindowsDeveloperConfig's
+# enable-winget-configure.ps1). Cheap to make sure of.
 function Initialize-VCRedist {
     if ((Get-RegistryValue $VCRedistKey 'Installed') -eq 1) { return }
-    Write-Host '==> Installing the Visual C++ 2015+ x64 runtime (winget configure needs it)'
+    Write-Host '==> Installing the Visual C++ 2015+ x64 runtime'
     & winget.exe install --id Microsoft.VCRedist.2015+.x64 --exact --source winget --silent `
         --accept-package-agreements --accept-source-agreements --disable-interactivity
     if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $WingetUpdateNotApplicable) {
@@ -131,38 +130,30 @@ function Initialize-VCRedist {
     }
 }
 
-# True if `winget configure` is usable: `--help` is a no-op that succeeds only when the
-# subcommand is available.
-function Test-WingetConfigure {
+# DSC v3 (dsc.exe, an MSIX with an app execution alias) applies configure.ps1's configurations.
+# Its Microsoft.WinGet/Package resource comes with App Installer, not with DSC, hence the check.
+function Initialize-Dsc {
+    Write-Host '==> Ensuring DSC v3 (dsc) is installed and up to date'
+    $verb = if (Get-Command dsc.exe -ErrorAction SilentlyContinue) { 'upgrade' } else { 'install' }
+    & winget.exe $verb --id Microsoft.DSC --exact --source winget `
+        --accept-package-agreements --accept-source-agreements --disable-interactivity
+    $code = $LASTEXITCODE
+    if (-not (Get-Command dsc.exe -ErrorAction SilentlyContinue)) {
+        throw "dsc isn't installed (winget $verb Microsoft.DSC exited with $code)"
+    }
+    if ($code -ne 0 -and $code -ne $WingetUpdateNotApplicable) {
+        Write-Host ('==> warning: winget {0} Microsoft.DSC exited with 0x{1:X8}; continuing' -f $verb, $code) -ForegroundColor Yellow
+    }
+    $output = @(& dsc.exe --version)
+    Write-Host "==> $($output -join ' ')"
     $ErrorActionPreference = 'Continue'  # in 5.1, redirected stderr would otherwise throw
-    $output = @(& winget.exe configure --help 2>&1)
-    return ($LASTEXITCODE -eq 0) -and (($output -join "`n") -match 'configur')
-}
-
-# Stops early, with an actionable message, where `winget configure` can't work; otherwise it
-# fails later with obscure errors. (From microsoft/WindowsDeveloperConfig's
-# assert-winget-configure.ps1 and enable-winget-configure.ps1.)
-function Assert-WingetConfigure {
-    $policy = Get-RegistryValue $ConfigurePolicyKey 'EnableWindowsPackageManagerConfiguration'
-    if ($null -ne $policy -and [int] $policy -eq 0) {
-        throw ("winget configure is disabled by Group Policy: $ConfigurePolicyKey\EnableWindowsPackageManagerConfiguration = 0 " +
-            '(Computer Configuration > Administrative Templates > Windows Components > App Installer > ' +
-            '"Enable Windows Package Manager Configuration"). Enable it or delete the value, then re-run.')
+    $resources = @(& dsc.exe resource list Microsoft.WinGet/Package 2>$null)
+    if (-not (($resources -join "`n") -match 'Microsoft\.WinGet/Package')) {
+        throw ('dsc has no Microsoft.WinGet/Package resource; it comes with App Installer (winget), which ' +
+            'is too old. Update "App Installer" from the Microsoft Store, then re-run.')
     }
-    Initialize-VCRedist
-    if (-not (Test-WingetConfigure)) {
-        Write-Host '==> winget configure is unavailable; running winget configure --enable'
-        & winget.exe configure --enable --disable-interactivity
-        if (-not (Test-WingetConfigure)) {
-            throw ('`winget configure --help` still fails after `winget configure --enable`. Make sure App ' +
-                'Installer is current (Microsoft Store, or https://github.com/microsoft/winget-cli/releases/latest) ' +
-                'and that this runs in an interactive desktop session, then re-run.')
-        }
-    }
-    Write-Host '==> winget configure is available'
 }
-
-# Updated here rather than in the winget configuration: configure.ps1 runs in it, and the
+# Updated here rather than in a DSC configuration: configure.ps1 runs in it, and the
 # installer can't replace a running pwsh.
 function Initialize-PowerShell {
     Write-Host '==> Ensuring PowerShell 7 is installed and up to date'
@@ -236,7 +227,8 @@ function Invoke-ElevatedSection {
     Set-Utf8Console
     Initialize-Winget
     Update-Winget
-    Assert-WingetConfigure
+    Initialize-VCRedist
+    Initialize-Dsc
     Initialize-PowerShell
 
     Write-Host '==> Handing off to configure.ps1'

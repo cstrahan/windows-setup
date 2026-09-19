@@ -1,6 +1,6 @@
 # GitForWindows: Git for Windows via winget, with pinned installer choices.
 
-using module .\Common.psm1
+using module WindowsSetup.Common
 
 $script:GitUninstallKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Git_is1'
 
@@ -23,12 +23,15 @@ $script:GitOptionNames = [ordered]@{
     EnableFSMonitor          = 'Enable FSMonitor'
 }
 
-# Microsoft.WinGet.Client is a dependency of Microsoft.WinGet.DSC, so winget downloads it
-# (into --module-path) whenever the configuration uses a WinGetPackage resource.
-function Import-WinGetClient {
-    if (-not (Get-Module Microsoft.WinGet.Client)) {
-        Import-Module Microsoft.WinGet.Client -ErrorAction Stop
+# Runs winget, capturing its output: this runs inside DSC's PowerShell adapter, which talks to
+# dsc over stdout, so nothing may print there. Throws with the output's tail on failure.
+function Invoke-Winget([string[]] $Arguments, [int[]] $SuccessCodes = @(0)) {
+    $output = @(& winget.exe @Arguments --accept-source-agreements --disable-interactivity 2>&1 | ForEach-Object { "$_" })
+    if ($LASTEXITCODE -notin $SuccessCodes) {
+        $tail = ($output | Where-Object { $_.Trim() -and $_ -notmatch '^\s*[-\\|/]\s*$' } | Select-Object -Last 5) -join ' / '
+        throw ('winget {0} failed (exit code 0x{1:X8}): {2}' -f ($Arguments -join ' '), $LASTEXITCODE, $tail)
     }
+    return $output
 }
 
 function Get-GitInstallState {
@@ -61,10 +64,12 @@ function Resolve-GitComponents([string[]] $Components) {
     return @($set)
 }
 
+# `winget list --upgrade-available` exits 0 either way and its messages are localized, but the
+# package id is never translated: it's listed only if an upgrade is available. (The approach
+# microsoft/WindowsDeveloperConfig takes.)
 function Test-GitUpdateAvailable([string] $Id) {
-    Import-WinGetClient
-    $package = Get-WinGetPackage -Id $Id -MatchOption Equals -ErrorAction Stop | Select-Object -First 1
-    return [bool] ($package -and $package.IsUpdateAvailable)
+    $output = Invoke-Winget @('list', '--id', $Id, '--exact', '--upgrade-available')
+    return [bool] ($output -match "(^|\s)$([regex]::Escape($Id))(\s|$)")
 }
 
 # Describes how the machine differs from the desired state; empty when it matches.
@@ -223,34 +228,24 @@ class GitForWindows {
     }
 
     [void] Set() {
-        Import-WinGetClient
+        # Essential here: DSC v3 calls Set() without testing first, and Set() reinstalls Git.
+        if ($this.Test()) { return }
         $state = Get-GitInstallState
+        $package = @('--id', $this.Id, '--exact', '--source', 'winget', '--silent')
         if ($this.Ensure -eq [Ensure]::Absent) {
-            if ($state) {
-                $result = Uninstall-WinGetPackage -Id $this.Id -MatchOption Equals -Mode Silent -ErrorAction Stop
-                if ($result.Status -ne 'Ok') { throw "Uninstalling $($this.Id) failed: $($result.Status) ($($result.ExtendedErrorCode))" }
-            }
+            if ($state) { Invoke-Winget (@('uninstall') + $package) | Out-Null }
             return
         }
 
         Assert-GitNotInUse $state
-        $params = @{
-            Id          = $this.Id
-            MatchOption = 'Equals'
-            Source      = 'winget'
-            Mode        = 'Silent'
-            Custom      = Get-GitInstallerArguments $this
-        }
+        $install = $package + @('--custom', (Get-GitInstallerArguments $this), '--accept-package-agreements')
         if ($state -and $this.UseLatest -and (Test-GitUpdateAvailable $this.Id)) {
-            $result = Update-WinGetPackage @params -ErrorAction Stop
+            Invoke-Winget (@('upgrade') + $install) | Out-Null
         } elseif ($state) {
             # Same version: reinstall to apply the changed choices.
-            $result = Install-WinGetPackage @params -Force -ErrorAction Stop
+            Invoke-Winget (@('install') + $install + @('--force')) | Out-Null
         } else {
-            $result = Install-WinGetPackage @params -ErrorAction Stop
-        }
-        if ($result.Status -ne 'Ok') {
-            throw "Installing $($this.Id) failed: $($result.Status) (extended error $($result.ExtendedErrorCode), installer exit code $($result.InstallerErrorCode))"
+            Invoke-Winget (@('install') + $install) | Out-Null
         }
     }
 }

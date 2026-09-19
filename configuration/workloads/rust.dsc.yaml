@@ -1,0 +1,49 @@
+# Rust via rustup, with the stable toolchain as default (from microsoft/WindowsDeveloperConfig's
+# rust workload). The msvc toolchain links with MSVC and the Windows SDK: rather than a separate
+# Visual Studio 2022 Build Tools, this adds the C++ desktop workload to the Visual Studio from the
+# visualstudio workload (which this one requires).
+#
+# PowerShellScript steps: DSC v3 runs setScript without testing first, so each setScript starts
+# by running the test itself. getScript outputs nothing (`return`, not `'$null'`, which
+# is output [null]), so a set that prints nothing matches it and reports no change.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  # "Desktop development with C++": MSVC, the linker, and the Windows SDK (via recommended).
+  - name: msvcForRust
+    type: WindowsSetup.VisualStudioComponents/VisualStudioComponents
+    properties:
+      Name: rust
+      Components:
+        - Microsoft.VisualStudio.Workload.NativeDesktop
+      IncludeRecommended: true
+
+  # After MSVC: rustup-init (which the package runs) otherwise warns "installing msvc toolchain
+  # without its prerequisites". Harmless, as the linker is only needed at build time, but noisy.
+  - name: rustup
+    type: Microsoft.WinGet/Package
+    dependsOn:
+      - "[resourceId('WindowsSetup.VisualStudioComponents/VisualStudioComponents', 'msvcForRust')]"
+    properties:
+      id: Rustlang.Rustup
+      source: winget
+      acceptAgreements: true
+
+  - name: stableToolchain
+    type: Microsoft.DSC.Transitional/PowerShellScript
+    dependsOn:
+      - "[resourceId('Microsoft.WinGet/Package', 'rustup')]"
+      - "[resourceId('WindowsSetup.VisualStudioComponents/VisualStudioComponents', 'msvcForRust')]"
+    properties:
+      getScript: 'return'
+      testScript: |
+        $env:Path = ([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User') | Where-Object { $_ }) -join ';'
+        if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) { return $false }
+        $default = & rustup default 2>$null  # e.g. "stable-x86_64-pc-windows-msvc (default)"
+        [bool] ("$default" -match '^stable-')
+      setScript: |
+        $env:Path = ([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User') | Where-Object { $_ }) -join ';'
+        if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) { throw 'rustup is not on PATH after installing Rustlang.Rustup' }
+        if ("$(& rustup default 2>$null)" -match '^stable-') { return }
+        $output = & rustup default stable 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "rustup default stable failed ($LASTEXITCODE): $(($output | Select-Object -Last 5) -join ' ')" }
+        'installed the stable toolchain'

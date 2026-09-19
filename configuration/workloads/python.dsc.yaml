@@ -1,0 +1,10 @@
+# Python 3.14 from python.org (from microsoft/WindowsDeveloperConfig's python workload). uv is
+# in the base configuration.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  - name: python
+    type: Microsoft.WinGet/Package
+    properties:
+      id: Python.Python.3.14
+      source: winget
+      acceptAgreements: true

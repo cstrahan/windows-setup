@@ -1,5 +1,14 @@
 @{
-    RootModule           = 'WindowsSetupDsc.psm1'
+    # One file per resource, plus shared code in Common.psm1 (which the others load with
+    # `using module`). DSC finds class-based resources in nested modules too.
+    NestedModules        = @(
+        'Common.psm1'
+        'WindowsCapability.psm1'
+        'PrecisionTouchpad.psm1'
+        'KeyboardRepeat.psm1'
+        'GoLang.psm1'
+        'GitForWindows.psm1'
+    )
     ModuleVersion        = '0.1.0'
     GUID                 = '7ed3e97c-bf79-4d0d-88fd-c9546c10a086'
     Author               = 'Charles Strahan'

@@ -10,7 +10,12 @@ See README.md for what the project does. These notes cover testing it from a Cla
   with `winget configure --module-path <repo>\dsc` (must be an absolute path), then sets up
   WSL 2, the distro, and uv + Ansible inside it.
 - `dsc/WindowsSetupDsc/`: our own class-based DSC resources, for gaps in the Gallery modules.
-  Everything else in `dsc/` is Gallery modules winget downloaded (git-ignored).
+  One `<Resource>.psm1` per resource, listed in the manifest's `NestedModules` and
+  `DscResourcesToExport`; shared code (the `Ensure` enum, `SystemParametersInfoW` interop) is in
+  `Common.psm1`, which each resource loads with `using module .\Common.psm1`. DSC discovers
+  class resources in nested modules (checked in winget's host). To add a resource, add both
+  manifest entries. Everything else in `dsc/` is Gallery modules winget downloaded
+  (git-ignored).
 - Exit code `3010` means "restart, then re-run". Every step must stay idempotent.
 
 ## Testing from the Claude desktop app

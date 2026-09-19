@@ -70,7 +70,7 @@ that matches, and logs the ones it skips. Currently:
 `PrecisionTouchpad` covers every user setting in Windows' touchpad API
 (`TOUCHPAD_PARAMETERS`): taps, the right-click zone, two-finger scroll and zoom, scrolling
 direction, sensitivity, cursor speed, and on newer hardware haptics. See the property comments
-in `dsc/WindowsSetupDsc/WindowsSetupDsc.psm1`.
+in `dsc/WindowsSetupDsc/PrecisionTouchpad.psm1`.
 
 **Touchpad settings on Windows 10 take effect at the next sign-in.** Windows 11 24H2 added an
 API for applying them immediately (`SPI_SETTOUCHPADPARAMETERS`), and `PrecisionTouchpad` uses

@@ -1,0 +1,27 @@
+# System-wide developer settings (from microsoft/WindowsDeveloperConfig's registry-system step).
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  # Sudo for Windows, inline mode (runs in the same window). Windows 11 24H2+ only; inert on
+  # Windows 10, which has no sudo.
+  - name: sudoInline
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo
+      valueName: Enabled
+      valueData: { DWord: 3 }
+
+  # Developer Mode (sideloading and developer features; the WinUI/WinForms workflows expect it).
+  - name: developerMode
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock
+      valueName: AllowDevelopmentWithoutDevLicense
+      valueData: { DWord: 1 }
+
+  # Win32 long path support (paths beyond MAX_PATH, for apps that opt in).
+  - name: longPaths
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKLM\SYSTEM\CurrentControlSet\Control\FileSystem
+      valueName: LongPathsEnabled
+      valueData: { DWord: 1 }

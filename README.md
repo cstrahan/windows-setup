@@ -40,16 +40,16 @@ From a clone, run `bootstrap.cmd` directly instead.
 3. **`configure.ps1`** (stage 2, PowerShell 7):
    - logs a preflight line (Windows build, winget, PowerShell, free disk space), with a warning
      if Windows is missing updates that WSLg needs or hardware virtualization is off
-   - applies `configuration/windows.dsc.yaml` with `dsc config set`, then any matching hardware
-     profiles, then the enabled workloads, printing what each one changed; then checks that
-     what they installed (`git`, `go`, `uv`, `code`, `scoop`, plus the workloads' commands) is
-     on PATH
+   - applies, with `dsc config set`, any matching hardware profiles, then the selected
+     workloads, printing what each one changed; then checks that what they installed (`scoop`
+     plus the workloads' commands) is on PATH
    - enables WSL 2, installs the distro (default `Ubuntu`, the latest LTS; you create the Linux
      user interactively). Installing the WSL platform needs a restart, see below
    - installs uv in the distro, and `ansible-core` plus the `ansible` collections as a uv tool
 
 Arguments to `bootstrap.cmd` pass through to `configure.ps1`: `-SkipDsc` (skip all DSC
-configurations), `-Workloads a,b` (these instead of the enabled list), `-SkipWorkloads`,
+configurations), `-Workloads a,b` (exactly these instead of the enabled list),
+`-ExcludeWorkloads a,b`,
 `-SkipWsl`, `-Distro NAME`. (`-Resumed` is for the resume task below.)
 
 ### Restarting for WSL
@@ -75,71 +75,69 @@ Most resources are DSC's and winget's built-in ones (`Microsoft.Windows/Registry
 Where those fall short, this repo has its own class-based PowerShell resources in `dsc/`, one
 module each: `WindowsSetup.WindowsCapability`, `.ScheduledTask`, `.DriverPackage`, `.DriverInstaller`, `.NvidiaDriver`, `.GitForWindows`, `.GoLang`,
 `.KeyboardRepeat`, `.PrecisionTouchpad`, `.VisualStudioComponents` (plus `WindowsSetup.Common`,
-shared code). DSC finds them through `PSModulePath`, which `configure.ps1` sets. To check for
-drift without changing anything, in an elevated PowerShell 7 at the repo root:
+shared code). DSC finds them through `PSModulePath`, which `configure.ps1` sets. To check a
+configuration for drift without changing anything, in an elevated PowerShell 7 at the repo root:
 
 ```powershell
 $env:PSModulePath = "$PWD\dsc;$env:PSModulePath"
-dsc config test --file configuration\windows.dsc.yaml
+dsc config test --file configuration\workloads\explorer.dsc.yaml
 ```
 
 (`dsc config set --what-if` shows what a run would do.)
 
-Currently configured:
+### Workloads
 
-- OpenSSH Client capability installed.
-- `ssh-agent` service: startup type Automatic, and running.
-- `RealTimeIsUniversal = 1`: the hardware clock is kept in UTC. Takes effect after a reboot.
-- Time sync: the Windows Time service stays running, and a scheduled task
-  (`\windows-setup\Resync time`) runs `w32tm /resync` whenever a network connects or the
-  machine resumes. Otherwise Windows waits for its next poll, which can be hours away, before
-  correcting the clock after sleep, hibernation or Fast Startup.
-- System: Developer Mode, Win32 long paths, `sudo` in inline mode (Windows 11 24H2+), and
-  Remote Desktop allowed. The Remote Desktop firewall rule is left closed, so it isn't reachable
-  from the network until you enable it (as in microsoft/WindowsDeveloperConfig).
-- Explorer (current user): show hidden files, show file extensions, show empty drives, full
-  path in the title bar, open to This PC, and Quick Access without frequent folders, recent
-  files, cloud files or sync-provider ads. Restart Explorer or sign out to see them.
-- Taskbar and search: "End task" in the taskbar's right-click menu (Windows 11 23H2+), no web
-  results or search highlights in search, no Start recommendations (Windows 11), no Widgets
-  or News and Interests.
-- Keyboard repeat (current user): shortest repeat delay, fastest repeat rate. Applied immediately.
-- Caps Lock acts as an extra Left Ctrl, on every keyboard. It takes effect after a restart:
-  Windows' remapping (`Scancode Map`) applies to all keyboards and is read at boot.
-- Windows PowerShell's execution policy is `RemoteSigned` for the current user, so local
-  scripts like Scoop's `scoop.ps1` shim can run. (PowerShell 7 already defaults to it.)
-- uv, Visual Studio Code and Windows Terminal installed.
-- Go, latest stable release (at least 1.27.1), from go.dev's official MSI (checksum-verified).
-- Git for Windows, latest version, with pinned installer choices: Explorer integration, editor,
-  Windows OpenSSH, line endings, etc. Changing a choice re-runs the installer.
+Everything is a workload: a configuration in `configuration/workloads/<name>.dsc.yaml`, listed in
+`configuration/workloads.psd1` with a description, the workloads it requires (applied first) and
+the commands it should put on PATH. `Enabled` there picks which ones run (currently all of
+them). For one run, `-Workloads go,rust` applies exactly those (plus what they require), and
+`-ExcludeWorkloads remote-desktop,taskbar` leaves some out. Excluding something another selected
+workload requires is an error, as is excluding `core`, which always runs.
+
+**Windows**
+
+| Workload | What it does |
+|---|---|
+| `core` (always) | Windows PowerShell's execution policy `RemoteSigned` for the current user, so local scripts like Scoop's `scoop.ps1` shim can run. (PowerShell 7 already defaults to it.) |
+| `ssh` | OpenSSH Client capability installed; `ssh-agent` service Automatic and running. |
+| `time` | `RealTimeIsUniversal = 1`: the hardware clock is kept in UTC (after a reboot). The Windows Time service stays running, and a scheduled task (`\windows-setup\Resync time`) runs `w32tm /resync` whenever a network connects or the machine resumes. Otherwise Windows waits for its next poll, which can be hours away, before correcting the clock after sleep, hibernation or Fast Startup. |
+| `system` | Developer Mode, Win32 long paths, `sudo` in inline mode (Windows 11 24H2+). |
+| `remote-desktop` | Remote Desktop allowed. The firewall rule is left closed, so it isn't reachable from the network until you enable it (as in microsoft/WindowsDeveloperConfig). |
+| `explorer` | For the current user: hidden files and file extensions shown, empty drives shown, full path in the title bar, opens to This PC, Quick Access without frequent folders, recent files, cloud files or sync-provider ads. Restart Explorer or sign out to see them. |
+| `taskbar` | "End task" in the taskbar's right-click menu (Windows 11 23H2+); no web results or search highlights in search; no Start recommendations (Windows 11); no Widgets or News and Interests. |
+| `keyboard` | Shortest repeat delay, fastest repeat rate (applied immediately). Caps Lock acts as an extra Left Ctrl on every keyboard, after a restart: Windows' remapping (`Scancode Map`) applies to all keyboards and is read at boot. |
 
 Settings marked Windows 11 are harmless on Windows 10: they're just registry values nothing reads.
 
-### Workloads
+**Tools**
 
-Optional toolchains, adapted from
-[microsoft/WindowsDeveloperConfig](https://github.com/microsoft/WindowsDeveloperConfig)'s
-workloads. Each is a configuration in `configuration/workloads/`, listed in
-`configuration/workloads.psd1` with the workloads it requires (applied first) and the commands
-it should put on PATH. `Enabled` there picks which ones run; `-Workloads` overrides it for one
-run.
-
-| Workload | Installs |
+| Workload | What it does |
 |---|---|
-| `visualstudio` | Visual Studio 2026 Community (required by `rust`, `winforms`, `winui`) |
-| `dotnet` | .NET 10 SDK |
-| `java` | Microsoft Build of OpenJDK 25 |
-| `python` | Python 3.14 (with the `py` launcher) |
-| `typescript` | Node.js LTS, and TypeScript (`tsc`) globally via npm |
-| `rust` | rustup with the stable toolchain as default, and Visual Studio's C++ workload for the MSVC linker and Windows SDK |
-| `powershell` | VS Code's PowerShell and Pester extensions, and PSScriptAnalyzer settings with the recommended rules |
-| `winforms` | Visual Studio's .NET desktop workload |
-| `winui` | Visual Studio's .NET desktop, UWP and Windows App SDK (C#) components, the `winapp` CLI and the Windows App Runtime 1.6 |
+| `terminal` | Windows Terminal. |
+| `vscode` | Visual Studio Code (it updates itself, so only its presence is managed). |
+| `git` | Git for Windows, latest version, with pinned installer choices: Explorer integration, VS Code as editor, Windows OpenSSH, line endings, a Terminal profile, etc. Changing a choice re-runs the installer. Requires `ssh`, `vscode`, `terminal`. |
+| `go` | Go, latest stable release (at least 1.27.1), from go.dev's official MSI (checksum-verified). |
+| `uv` | uv, the Python package and project manager. |
+
+**Development stacks**, adapted from
+[microsoft/WindowsDeveloperConfig](https://github.com/microsoft/WindowsDeveloperConfig)'s workloads:
+
+| Workload | What it does |
+|---|---|
+| `visualstudio` | Visual Studio 2026 Community (required by `rust`, `winforms`, `winui`). |
+| `dotnet` | .NET 10 SDK. |
+| `java` | Microsoft Build of OpenJDK 25. |
+| `python` | Python 3.14 (with the `py` launcher). |
+| `typescript` | Node.js LTS, and TypeScript (`tsc`) globally via npm. |
+| `rust` | rustup with the stable toolchain as default, and Visual Studio's C++ workload for the MSVC linker and Windows SDK. |
+| `powershell` | VS Code's PowerShell and Pester extensions, and PSScriptAnalyzer settings with the recommended rules. |
+| `winforms` | Visual Studio's .NET desktop workload (plus `system`, for Developer Mode). |
+| `winui` | Visual Studio's .NET desktop, UWP and Windows App SDK (C#) components, the `winapp` CLI and the Windows App Runtime 1.6 (plus `system`, for Developer Mode). |
 ### Hardware profiles
 
 `configuration/hardware.psd1` lists extra configurations that apply only to matching
 hardware. Profiles match on the machine's vendor, model and version, and optionally on a
-present device's hardware ID. After `windows.dsc.yaml`, `configure.ps1` applies every profile
+present device's hardware ID. Before the workloads, `configure.ps1` applies every profile
 that matches, and logs the ones it skips. Currently:
 
 - **System76 Gazelle (gaze16)**: the two drivers System76 lists for it in

@@ -1,0 +1,11 @@
+# Allow Remote Desktop (from microsoft/WindowsDeveloperConfig's registry-system step).
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  # Allow Remote Desktop connections. The "Remote Desktop" firewall rules stay as they are
+  # (off by default), so connections are still blocked until those are enabled.
+  - name: remoteDesktop
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server
+      valueName: fDenyTSConnections
+      valueData: { DWord: 0 }

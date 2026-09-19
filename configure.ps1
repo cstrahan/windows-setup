@@ -4,22 +4,23 @@
 Stage 2 of the windows-setup bootstrap, run by bootstrap.ps1 in PowerShell 7.
 
 .DESCRIPTION
-Applies configuration\windows.dsc.yaml with DSC v3 (dsc.exe), then any matching hardware
-profiles (configuration\hardware.psd1), then the enabled workloads (configuration\workloads.psd1),
-then sets up WSL 2 with uv and Ansible inside it.
+Applies, with DSC v3 (dsc.exe), any matching hardware profiles (configuration\hardware.psd1), then
+the selected workloads (configuration\workloads.psd1), then sets up WSL 2 with uv and Ansible
+inside it.
 
 Every step checks current state before acting, so this is safe to re-run. Installing the WSL
 platform needs a restart; then it exits with 3010, and bootstrap.ps1 registers a logon task that
 continues setup (with -Resumed) after the restart.
 
 .PARAMETER SkipDsc
-Don't apply the DSC configurations (base, hardware profiles, workloads).
+Don't apply the DSC configurations (hardware profiles and workloads).
 
 .PARAMETER Workloads
-Apply these workloads (plus what they require) instead of workloads.psd1's Enabled list.
+Apply exactly these workloads (plus what they require, and the Always ones) instead of
+workloads.psd1's Enabled list, e.g. -Workloads go,rust.
 
-.PARAMETER SkipWorkloads
-Apply the base configuration and hardware profiles, but no workloads.
+.PARAMETER ExcludeWorkloads
+Leave these workloads out of the selection, e.g. -ExcludeWorkloads remote-desktop,taskbar.
 
 .PARAMETER SkipWsl
 Don't set up WSL, or uv and Ansible inside it.
@@ -36,7 +37,7 @@ of asking for another restart.
 param(
     [Alias('SkipWinget')] [switch] $SkipDsc,
     [string[]] $Workloads,
-    [switch] $SkipWorkloads,
+    [string[]] $ExcludeWorkloads,
     [switch] $SkipWsl,
     [string] $Distro = 'Ubuntu',
     [switch] $Resumed
@@ -46,10 +47,9 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $Root = $PSScriptRoot
-$BaseConfig = Join-Path $Root 'configuration\windows.dsc.yaml'
 # Extra configurations applied only on matching hardware.
 $HardwareProfiles = Join-Path $Root 'configuration\hardware.psd1'
-# Optional toolchains, each its own configuration.
+# Workloads: everything else, one configuration each.
 $WorkloadList = Join-Path $Root 'configuration\workloads.psd1'
 # Our own class-based DSC resources, one module each (WindowsSetup.*). dsc's PowerShell adapter
 # finds them through PSModulePath, which dsc inherits from this process.
@@ -65,9 +65,9 @@ $LxssKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss'
 $VirtualizationHelp = ('Turn on virtualization (Intel VT-x / AMD-V, sometimes "SVM") in the BIOS/UEFI settings, or, ' +
     'in a virtual machine, expose nested virtualization to it.')
 $WslProbeTimeout = 60  # seconds; a healthy `wsl --status` returns in well under this
-# Commands the base configuration (plus bootstrap.ps1's Scoop) should leave on PATH; checked
-# afterwards, along with the applied workloads' Commands.
-$ExpectedCommands = [System.Collections.Generic.List[string]] @('git', 'go', 'uv', 'code', 'scoop')
+# Commands that should be on PATH afterwards: bootstrap.ps1's Scoop, plus the applied workloads'
+# Commands.
+$ExpectedCommands = [System.Collections.Generic.List[string]] @('scoop')
 $WslResetTimeout = 120
 
 # Ask wsl.exe for UTF-8 output instead of UTF-16LE (older builds ignore it; see Invoke-Native).
@@ -269,34 +269,50 @@ function Invoke-DscConfiguration([string] $Path) {
 
 # --- workloads -------------------------------------------------------------------------
 
-# The workloads to apply, each after the ones it Requires (depth-first), without duplicates.
-function Resolve-Workloads([hashtable] $Definitions, [string[]] $Names) {
+# The workloads to apply: the Always ones, then Names, each after the ones it Requires
+# (depth-first), without duplicates, and none of Exclude. Excluding an Always workload, or one a
+# selected workload requires, is an error rather than a silently partial setup.
+function Resolve-Workloads([hashtable] $Definitions, [string[]] $Names, [string[]] $Exclude = @()) {
+    $known = { param([string] $Name)
+        if (-not $Definitions.ContainsKey($Name)) {
+            throw "unknown workload '$Name' (known: $(($Definitions.Keys | Sort-Object) -join ', '))"
+        }
+    }
+    $excluded = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $Exclude) {
+        & $known $name
+        if ($Definitions[$name]['Always']) { throw "workload '$name' is always applied and can't be excluded" }
+        [void] $excluded.Add($name)
+    }
     $ordered = [System.Collections.Generic.List[string]]::new()
     $inProgress = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $visit = {
         param([string] $Name, [string[]] $Chain)
         $Name = $Name.ToLowerInvariant()
         if ($ordered.Contains($Name)) { return }
-        if (-not $Definitions.ContainsKey($Name)) {
-            throw "unknown workload '$Name' (known: $(($Definitions.Keys | Sort-Object) -join ', '))"
+        & $known $Name
+        if ($excluded.Contains($Name)) {
+            if ($Chain) { throw "workload '$($Chain[-1])' requires '$Name', which is excluded; exclude '$($Chain[-1])' too, or keep '$Name'" }
+            return
         }
         if (-not $inProgress.Add($Name)) { throw "workload cycle: $((@($Chain) + $Name) -join ' -> ')" }
         foreach ($required in @($Definitions[$Name]['Requires'])) { & $visit $required (@($Chain) + $Name) }
         $ordered.Add($Name)
     }
-    foreach ($name in $Names) { & $visit $name @() }
+    $always = @($Definitions.Keys | Where-Object { $Definitions[$_]['Always'] } | Sort-Object)
+    foreach ($name in @($always) + @($Names)) { & $visit $name @() }
     return , $ordered.ToArray()
+}
+
+# From bootstrap.cmd, -Workloads a,b arrives as one argument, "a,b".
+function Split-NameList([string[]] $Names) {
+    return @($Names -split ',' | ForEach-Object Trim | Where-Object { $_ })
 }
 
 function Invoke-WorkloadConfiguration {
     $list = Import-PowerShellDataFile -Path $WorkloadList
-    # From bootstrap.cmd, -Workloads a,b arrives as one argument, "a,b".
-    $names = if ($null -ne $Workloads) { @($Workloads -split ',' | ForEach-Object Trim | Where-Object { $_ }) } else { @($list.Enabled) }
-    $ordered = Resolve-Workloads $list.Workloads $names
-    if (-not $ordered) {
-        Write-Step 'No workloads enabled'
-        return
-    }
+    $names = if ($null -ne $Workloads) { Split-NameList $Workloads } else { @($list.Enabled) }
+    $ordered = Resolve-Workloads $list.Workloads $names (Split-NameList $ExcludeWorkloads)
     Write-Step "Workloads: $($ordered -join ', ')"
     foreach ($name in $ordered) {
         Invoke-DscConfiguration (Join-Path (Split-Path $WorkloadList) "workloads\$name.dsc.yaml")
@@ -305,7 +321,6 @@ function Invoke-WorkloadConfiguration {
         }
     }
 }
-
 # Windows' keyboard remapping, as hex ('' if unset). It only takes effect after a restart.
 function Get-ScancodeMap {
     $value = Get-ItemProperty -Path $ScancodeMapKey -Name 'Scancode Map' -ErrorAction SilentlyContinue
@@ -572,13 +587,10 @@ function Invoke-Configure {
     if (-not $SkipDsc) {
         Initialize-DscModulePath
         $scancodeMap = Get-ScancodeMap
-        Invoke-DscConfiguration $BaseConfig
+        Invoke-HardwareConfiguration
+        Invoke-WorkloadConfiguration
         if ((Get-ScancodeMap) -ne $scancodeMap) {
             Write-Step 'Note: the keyboard remapping (Scancode Map) changed; it takes effect after a restart.'
-        }
-        Invoke-HardwareConfiguration
-        if (-not $SkipWorkloads) {
-            Invoke-WorkloadConfiguration
         }
         Assert-ExpectedCommands
     }

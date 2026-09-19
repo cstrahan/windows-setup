@@ -1,0 +1,10 @@
+# Go.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  # From go.dev rather than winget's GoLang.Go, which can trail upstream releases by days.
+  - name: go
+    type: WindowsSetup.GoLang/GoLang
+    properties:
+      IsSingleInstance: "Yes"  # quoted: YAML would otherwise read it as a boolean
+      UseLatest: true
+      MinimumVersion: 1.27.1

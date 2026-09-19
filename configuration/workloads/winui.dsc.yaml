@@ -1,6 +1,6 @@
 # WinUI 3 / Windows App SDK development (from microsoft/WindowsDeveloperConfig's winui workload,
 # which mirrors https://learn.microsoft.com/windows/apps/get-started/start-here). Requires the
-# dotnet and visualstudio workloads; Developer Mode is in the base configuration.
+# dotnet and visualstudio workloads, and system (Developer Mode).
 $schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
 resources:
   - name: winuiComponents

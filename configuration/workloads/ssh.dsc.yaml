@@ -1,0 +1,20 @@
+# The OpenSSH client and its agent. (Git uses them: see the git workload.)
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  # Ships with Windows 10 1809+, but it's an optional capability that can be missing.
+  # Our own resource: DSC's Microsoft.Windows/FeatureOnDemandList won't run from DSC's MSIX install.
+  - name: openSshClient
+    type: WindowsSetup.WindowsCapability/WindowsCapability
+    properties:
+      Name: OpenSSH.Client~~~~0.0.1.0
+      Ensure: Present
+
+  # The OpenSSH agent is disabled by default.
+  - name: sshAgent
+    type: Microsoft.Windows/Service
+    dependsOn:
+      - "[resourceId('WindowsSetup.WindowsCapability/WindowsCapability', 'openSshClient')]"
+    properties:
+      name: ssh-agent
+      startType: Automatic
+      status: Running

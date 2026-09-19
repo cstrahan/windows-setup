@@ -1,0 +1,14 @@
+# Always applied, whatever the workload selection: what bootstrap.ps1's own steps rely on.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  # Windows PowerShell's default policy (Restricted) blocks local scripts, including Scoop's
+  # `scoop.ps1` shim. RemoteSigned for the current user is what Scoop asks for, and is the value
+  # `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` writes. (PowerShell 7 already defaults
+  # to RemoteSigned. Scoop itself is installed by bootstrap.ps1, since its installer runs
+  # unelevated.)
+  - name: windowsPowerShellExecutionPolicy
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\PowerShell\1\ShellIds\Microsoft.PowerShell
+      valueName: ExecutionPolicy
+      valueData: { String: RemoteSigned }

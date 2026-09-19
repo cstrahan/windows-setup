@@ -1,0 +1,46 @@
+# Clock: RTC in UTC, and prompt time syncs after sleep or reconnecting.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  # Keep the hardware clock (RTC) in UTC, like Linux does, so dual-booting doesn't skew the
+  # clock. Windows reads this at boot, so it takes effect after a reboot.
+  - name: rtcIsUniversal
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKLM\SYSTEM\CurrentControlSet\Control\TimeZoneInformation
+      valueName: RealTimeIsUniversal
+      valueData: { QWord: 1 }
+
+  # Windows only polls its time server every several hours (SpecialPollInterval) and doesn't
+  # resync on wake, so after sleep, hibernation or Fast Startup the clock can stay wrong for
+  # hours. Keep the time service running, and resync whenever the network connects or the
+  # machine resumes.
+  - name: timeService
+    type: Microsoft.Windows/Service
+    properties:
+      name: W32Time
+      startType: Automatic  # non-domain Windows 10 defaults to a trigger start
+      status: Running
+
+  - name: timeResyncTask
+    type: WindowsSetup.ScheduledTask/ScheduledTask
+    dependsOn:
+      - "[resourceId('Microsoft.Windows/Service', 'timeService')]"
+    properties:
+      TaskPath: \windows-setup\
+      TaskName: Resync time
+      Description: Resync the clock (w32tm /resync) when a network connects or the machine resumes from sleep. Managed by windows-setup.
+      Execute: '%SystemRoot%\System32\w32tm.exe'
+      Arguments: /resync
+      # NetworkProfile 10000 = network connected; Power-Troubleshooter 1 = resumed from sleep.
+      EventSubscription: >-
+        <QueryList><Query Id="0" Path="Microsoft-Windows-NetworkProfile/Operational">
+        <Select Path="Microsoft-Windows-NetworkProfile/Operational">*[System[Provider[@Name='Microsoft-Windows-NetworkProfile'] and EventID=10000]]</Select>
+        <Select Path="System">*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]]</Select>
+        </Query></QueryList>
+      Delay: PT15S  # give DNS a moment after the network comes up
+      RunAs: SYSTEM
+      MultipleInstances: IgnoreNew
+      ExecutionTimeLimit: PT5M
+      # Task Scheduler's defaults skip tasks on battery, which would defeat this on laptops.
+      AllowStartIfOnBatteries: true
+      DontStopIfGoingOnBatteries: true

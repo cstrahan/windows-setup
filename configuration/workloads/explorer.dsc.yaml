@@ -1,0 +1,70 @@
+# File Explorer and Quick Access, per user (HKCU).
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  # Explorer picks these up in new windows after restarting it (or signing out).
+
+  # Folder Options: only settings that differ from the Windows 10 defaults.
+  - name: explorerShowHiddenFiles
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+      valueName: Hidden
+      valueData: { DWord: 1 }  # default 2: don't show
+
+  - name: explorerShowFileExtensions
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+      valueName: HideFileExt
+      valueData: { DWord: 0 }  # default 1
+
+  - name: explorerShowEmptyDrives
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+      valueName: HideDrivesWithNoMedia
+      valueData: { DWord: 0 }  # default 1
+
+  - name: explorerFullPathInTitleBar
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState
+      valueName: FullPath
+      valueData: { DWord: 1 }  # default 0
+
+  # From microsoft/WindowsDeveloperConfig's registry-explorer step:
+  - name: explorerOpenToThisPC
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+      valueName: LaunchTo
+      valueData: { DWord: 1 }  # default: Quick access
+
+  - name: quickAccessNoFrequentFolders
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer
+      valueName: ShowFrequent
+      valueData: { DWord: 0 }
+
+  - name: quickAccessNoRecentFiles
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer
+      valueName: ShowRecent
+      valueData: { DWord: 0 }
+
+  # Windows 11 only (recommended/cloud files in Quick Access).
+  - name: quickAccessNoCloudFiles
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer
+      valueName: ShowCloudFilesInQuickAccess
+      valueData: { DWord: 0 }
+
+  - name: explorerNoSyncProviderTips
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced
+      valueName: ShowSyncProviderNotifications
+      valueData: { DWord: 0 }

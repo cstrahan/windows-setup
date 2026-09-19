@@ -1,0 +1,30 @@
+# Git for Windows, with pinned installer choices. Requires ssh, vscode and terminal (see below).
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  # The installer only offers some choices when their targets exist: EditorOption needs VS Code,
+  # the windowsterminal component needs Windows Terminal, and ExternalOpenSSH makes Git use
+  # Windows' OpenSSH (and so the ssh-agent service) instead of its bundled copy.
+  - name: git
+    type: WindowsSetup.GitForWindows/GitForWindows
+    properties:
+      Id: Git.Git
+      UseLatest: true
+      Components:
+        - ext\shellhere      # Explorer: "Open Git Bash here"
+        - ext\guihere        # Explorer: "Open Git GUI here"
+        - gitlfs
+        - assoc              # .gitconfig, .gitattributes, ... open in the editor
+        - assoc_sh           # .sh files run with Bash
+        - windowsterminal    # Git Bash profile in Windows Terminal
+      EditorOption: VisualStudioCode
+      DefaultBranchOption: main
+      PathOption: Cmd
+      SSHOption: ExternalOpenSSH
+      CURLOption: WinSSL
+      CRLFOption: CRLFAlways
+      BashTerminalOption: MinTTY
+      GitPullBehaviorOption: Merge
+      UseCredentialManager: Enabled
+      PerformanceTweaksFSCache: Enabled
+      EnableSymlinks: Enabled
+      EnableFSMonitor: Disabled

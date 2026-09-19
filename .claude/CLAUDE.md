@@ -15,11 +15,13 @@ See README.md for what the project does. These notes cover testing it from a Cla
   elevated section is possible but not simple; see "Future directions" for what was measured and
   a design for supporting bootstrap starts from an elevated prompt.
 - `configure.ps1` (stage 2, PowerShell 7): puts `<repo>\dsc` on `PSModulePath`, applies
-  `configuration/windows.dsc.yaml` with `dsc config set --output-format json`
-  (`Invoke-DscConfiguration`: stdout is parsed into a changed/unchanged summary, stderr traces go
-  to the console), then matching hardware profiles (`configuration/hardware.psd1`), then the
-  workloads (`configuration/workloads.psd1` + `configuration/workloads/*.dsc.yaml`;
-  `Resolve-Workloads` orders them by `Requires`), then sets up WSL 2, the distro, and uv +
+  each configuration with `dsc config set --output-format json` (`Invoke-DscConfiguration`:
+  stdout is parsed into a changed/unchanged summary, stderr traces go to the console): matching
+  hardware profiles (`configuration/hardware.psd1`), then the workloads
+  (`configuration/workloads.psd1` + `configuration/workloads/*.dsc.yaml`). There's no base
+  config: everything, even Explorer settings, is a workload. `Resolve-Workloads` adds the
+  `Always` ones (`core`), applies `-Workloads`/`-ExcludeWorkloads`, orders by `Requires`, and
+  refuses exclusions that break a requirement. After that it sets up WSL 2, the distro, and uv +
   Ansible inside it. Programs are run through `Invoke-Native` (console passthrough, or
   `-Capture` / `-CaptureStdout`, `-InputText`, `-TimeoutSeconds`). Dot-sourcing it
   (`. .\configure.ps1`) only defines the functions, so they can be tested directly in `pwsh`
@@ -138,8 +140,9 @@ Gotchas:
   - With `$env:PSModulePath = "$PWD\dsc;$env:PSModulePath"`: `dsc config test --file <config>
     --output-format json` (per-resource `inDesiredState` / `differingProperties`),
     `dsc config set --what-if`, and `dsc resource list 'WindowsSetup.*' --adapter
-    Microsoft.Adapter/PowerShell` (discovery). The workloads and hardware profile test fine
-    unelevated; `windows.dsc.yaml` fails because `WindowsCapability`'s DISM calls need admin.
+    Microsoft.Adapter/PowerShell` (discovery). Most workloads and hardware profiles test fine
+    unelevated; `ssh` fails because `WindowsCapability`'s DISM calls need admin, and `time`'s
+    SYSTEM-owned task reads as drift (see "Time sync").
   - Feature state without admin: `Get-CimInstance Win32_OptionalFeature` (InstallState 1 = enabled).
   - Pending servicing reboot: `Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'`.
 - **DSC v3 (dsc 3.2.3, the `Microsoft.DSC` MSIX from winget; switched from `winget configure` on
@@ -297,7 +300,7 @@ Gotchas:
     `function wsl.exe` fake isn't enough), set `$Resumed`, and point `$CbsRebootPendingKey` /
     `$LxssKey` at scratch `HKCU:` keys.
   - The task: dot-source `bootstrap.ps1` in Windows PowerShell, set `$passthru = @('-SkipWsl',
-    '-SkipWorkloads')`, call `Register-ResumeTask` (works unelevated), inspect it with `schtasks
+    '-Workloads', 'core')`, call `Register-ResumeTask` (works unelevated), inspect it with `schtasks
     /query /tn "\windows-setup\Resume after restart" /xml`, then `Start-ScheduledTask` it. That
     runs what the logon trigger would: a visible window, a UAC prompt, and an elevated window
     waiting for Enter (tell the user). The task disappearing shows the elevated section ran.

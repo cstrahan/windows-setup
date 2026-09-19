@@ -1,0 +1,20 @@
+# Keyboard: repeat rate and delay, and Caps Lock as Ctrl.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+resources:
+  # Keyboard repeat (Control Panel > Keyboard): applied immediately and saved.
+  - name: keyboardRepeat
+    type: WindowsSetup.KeyboardRepeat/KeyboardRepeat
+    properties:
+      IsSingleInstance: "Yes"  # quoted: YAML would otherwise read it as a boolean
+      RepeatDelay: 0  # default 1
+      RepeatRate: 31  # the default, and the fastest
+
+  # Caps Lock acts as an extra Left Ctrl, on every keyboard. Windows' Scancode Map can't be
+  # per-keyboard, and takes effect after a restart. Format: 8-byte header, entry count 2 (one
+  # mapping + terminator), 1D 00 3A 00 = Left Ctrl (0x1D) replacing Caps Lock (0x3A), terminator.
+  - name: capsLockAsCtrl
+    type: Microsoft.Windows/Registry
+    properties:
+      keyPath: HKLM\SYSTEM\CurrentControlSet\Control\Keyboard Layout
+      valueName: Scancode Map
+      valueData: { Binary: [0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 29, 0, 58, 0, 0, 0, 0, 0] }

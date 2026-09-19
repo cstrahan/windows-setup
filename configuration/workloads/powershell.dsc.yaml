@@ -1,5 +1,5 @@
 # PowerShell development in VS Code (from microsoft/WindowsDeveloperConfig's powershell workload).
-# PowerShell 7 comes from bootstrap.ps1 and VS Code from the base configuration.
+# PowerShell 7 comes from bootstrap.ps1 and VS Code from the vscode workload (required).
 #
 # Differences from theirs: extensions are installed with `code --install-extension` instead of the
 # prerelease Microsoft.VSCode.Dsc module, and settings.json is only edited if it has no comments

@@ -1,6 +1,6 @@
 # WinForms development (from microsoft/WindowsDeveloperConfig's winforms workload). Requires the
-# dotnet and visualstudio workloads (for the .NET SDK and Visual Studio); Developer Mode is in the
-# base configuration. This adds the .NET desktop workload to Visual Studio.
+# dotnet and visualstudio workloads (for the .NET SDK and Visual Studio), and system (Developer
+# Mode). This adds the .NET desktop workload to Visual Studio.
 $schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
 resources:
   - name: dotnetDesktop

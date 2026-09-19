@@ -1,5 +1,5 @@
-# Hardware profiles: extra DSC configurations that configure.ps1 applies, after
-# windows.dsc.yaml, on machines that match (every matching profile, in this order).
+# Hardware profiles: extra DSC configurations that configure.ps1 applies, before
+# the workloads, on machines that match (every matching profile, in this order).
 #
 # Each profile has a Name, a Config file (relative to this directory), an optional Note printed
 # when it applies, and match criteria. All criteria given must match; values are

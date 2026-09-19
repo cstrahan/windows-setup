@@ -14,12 +14,48 @@ $RebootRequiredExitCode = 3010
 $WingetUpdateNotApplicable = 0x8A15002B  # `winget upgrade`: already the latest version
 $MinWingetVersion = [version] '1.6'  # `winget configure` went GA in 1.6
 $Pwsh = Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+$VCRedistKey = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'
+$ConfigurePolicyKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppInstaller'
 $relaunched = $args -contains '--elevated-relaunch'
 $passthru = @($args | Where-Object { $_ -ne '--elevated-relaunch' })
 
 function Test-Admin {
     $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# Retries a network operation with exponential backoff (2s, 4s, ...). HTTP 4xx errors aren't
+# retried: they won't go away. (Idea from microsoft/WindowsDeveloperConfig's invoke-retry.ps1.)
+function Invoke-WithRetry([scriptblock] $Action, [string] $Name, [int] $Attempts = 3) {
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            return & $Action
+        } catch {
+            $status = $null
+            if ($_.Exception -is [System.Net.WebException] -and $_.Exception.Response) {
+                $status = [int] $_.Exception.Response.StatusCode
+            }
+            if ($attempt -ge $Attempts -or ($status -ge 400 -and $status -lt 500)) { throw }
+            $delay = [int] [Math]::Pow(2, $attempt)
+            Write-Host "==> $Name failed ($($_.Exception.Message)); retrying in ${delay}s"
+            Start-Sleep -Seconds $delay
+        }
+    }
+}
+
+# Makes this (elevated) window's console UTF-8, so winget's spinner and progress-bar glyphs
+# render instead of turning into mojibake under Windows PowerShell 5.1's default code page. The
+# code page also carries over to configure.ps1. Only for the elevated window, which is ours; the
+# original window is the user's terminal. (From microsoft/WindowsDeveloperConfig.)
+function Set-Utf8Console {
+    try {
+        $utf8 = New-Object System.Text.UTF8Encoding $false
+        [Console]::OutputEncoding = $utf8
+        $global:OutputEncoding = $utf8
+        & cmd.exe /c 'chcp 65001 >nul'
+    } catch {
+        Write-Host "==> warning: couldn't switch the console to UTF-8: $($_.Exception.Message)"
+    }
 }
 
 function Initialize-Winget {
@@ -73,6 +109,57 @@ function Update-Winget {
     Write-Host "==> winget $after"
 }
 
+# A registry value, or $null if the key or the value doesn't exist. (Not Get-ItemPropertyValue:
+# in 5.1 it throws for a missing value even with -ErrorAction SilentlyContinue.)
+function Get-RegistryValue([string] $Path, [string] $Name) {
+    $item = Get-ItemProperty -Path $Path -ErrorAction SilentlyContinue
+    if ($item -and $item.PSObject.Properties[$Name]) { return $item.$Name }
+    return $null
+}
+
+# `winget configure` depends on the Visual C++ 2015+ x64 runtime, which App Installer doesn't
+# always bring along (per microsoft/WindowsDeveloperConfig's enable-winget-configure.ps1).
+function Initialize-VCRedist {
+    if ((Get-RegistryValue $VCRedistKey 'Installed') -eq 1) { return }
+    Write-Host '==> Installing the Visual C++ 2015+ x64 runtime (winget configure needs it)'
+    & winget.exe install --id Microsoft.VCRedist.2015+.x64 --exact --source winget --silent `
+        --accept-package-agreements --accept-source-agreements --disable-interactivity
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $WingetUpdateNotApplicable) {
+        throw ('installing the Visual C++ runtime failed (winget exited with 0x{0:X8})' -f $LASTEXITCODE)
+    }
+}
+
+# True if `winget configure` is usable: `--help` is a no-op that succeeds only when the
+# subcommand is available.
+function Test-WingetConfigure {
+    $ErrorActionPreference = 'Continue'  # in 5.1, redirected stderr would otherwise throw
+    $output = @(& winget.exe configure --help 2>&1)
+    return ($LASTEXITCODE -eq 0) -and (($output -join "`n") -match 'configur')
+}
+
+# Stops early, with an actionable message, where `winget configure` can't work; otherwise it
+# fails later with obscure errors. (From microsoft/WindowsDeveloperConfig's
+# assert-winget-configure.ps1 and enable-winget-configure.ps1.)
+function Assert-WingetConfigure {
+    $policy = Get-RegistryValue $ConfigurePolicyKey 'EnableWindowsPackageManagerConfiguration'
+    if ($null -ne $policy -and [int] $policy -eq 0) {
+        throw ("winget configure is disabled by Group Policy: $ConfigurePolicyKey\EnableWindowsPackageManagerConfiguration = 0 " +
+            '(Computer Configuration > Administrative Templates > Windows Components > App Installer > ' +
+            '"Enable Windows Package Manager Configuration"). Enable it or delete the value, then re-run.')
+    }
+    Initialize-VCRedist
+    if (-not (Test-WingetConfigure)) {
+        Write-Host '==> winget configure is unavailable; running winget configure --enable'
+        & winget.exe configure --enable --disable-interactivity
+        if (-not (Test-WingetConfigure)) {
+            throw ('`winget configure --help` still fails after `winget configure --enable`. Make sure App ' +
+                'Installer is current (Microsoft Store, or https://github.com/microsoft/winget-cli/releases/latest) ' +
+                'and that this runs in an interactive desktop session, then re-run.')
+        }
+    }
+    Write-Host '==> winget configure is available'
+}
+
 # Updated here rather than in the winget configuration: configure.ps1 runs in it, and the
 # installer can't replace a running pwsh.
 function Initialize-PowerShell {
@@ -105,7 +192,9 @@ function Install-Scoop {
 
     Write-Host '==> Installing Scoop'
     $installer = Join-Path $env:TEMP "install-scoop-$PID.ps1"
-    Invoke-WebRequest -UseBasicParsing -Uri 'https://get.scoop.sh' -OutFile $installer
+    Invoke-WithRetry -Name 'Downloading the Scoop installer' {
+        Invoke-WebRequest -UseBasicParsing -Uri 'https://get.scoop.sh' -OutFile $installer
+    }
     try {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
         $code = $LASTEXITCODE
@@ -126,14 +215,19 @@ function Invoke-UnelevatedSection {
 # (Not a return value: that would also capture all the programs' output, which must reach the
 # console.)
 function Invoke-ElevatedSection {
+    Set-Utf8Console
     Initialize-Winget
     Update-Winget
+    Assert-WingetConfigure
     Initialize-PowerShell
 
     Write-Host '==> Handing off to configure.ps1'
     & $Pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'configure.ps1') @passthru
     $script:exitCode = $LASTEXITCODE
 }
+
+# Dot-sourcing (`. .\bootstrap.ps1`) only defines the functions, e.g. for testing.
+if ($MyInvocation.InvocationName -eq '.') { return }
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 

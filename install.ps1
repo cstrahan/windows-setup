@@ -26,10 +26,32 @@
     $keep = 3  # most recently used commits to keep in the cache
     $headers = @{ 'User-Agent' = 'windows-setup-install' }
 
+    # Retries network calls with exponential backoff (2s, 4s). HTTP 4xx errors (e.g. an unknown
+    # ref) aren't retried: they won't go away.
+    function Invoke-WithRetry([scriptblock] $Action, [string] $Name) {
+        for ($attempt = 1; ; $attempt++) {
+            try {
+                return & $Action
+            } catch {
+                $status = $null
+                if ($_.Exception -is [System.Net.WebException] -and $_.Exception.Response) {
+                    $status = [int] $_.Exception.Response.StatusCode
+                }
+                if ($attempt -ge 3 -or ($status -ge 400 -and $status -lt 500)) { throw }
+                $delay = [int] [Math]::Pow(2, $attempt)
+                Write-Host "==> $Name failed ($($_.Exception.Message)); retrying in ${delay}s"
+                Start-Sleep -Seconds $delay
+            }
+        }
+    }
+
     try {
         Write-Host "==> Resolving $repo@$Ref"
-        $sha = "$(Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/commits/$Ref" `
-            -Headers ($headers + @{ Accept = 'application/vnd.github.sha' }))".Trim()
+        $sha = Invoke-WithRetry -Name "Resolving $Ref" {
+            Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/commits/$Ref" `
+                -Headers ($headers + @{ Accept = 'application/vnd.github.sha' })
+        }
+        $sha = "$sha".Trim()
         if ($sha -notmatch '^[0-9a-f]{40}$') {
             throw "unexpected commit id from GitHub: '$sha'"
         }
@@ -44,7 +66,9 @@
             New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
             $zip = Join-Path $CacheDir "$sha.zip"
             $staging = Join-Path $CacheDir "$sha.partial"
-            Invoke-WebRequest -UseBasicParsing -Uri "https://codeload.github.com/$repo/zip/$sha" -OutFile $zip -Headers $headers
+            Invoke-WithRetry -Name 'Downloading' {
+                Invoke-WebRequest -UseBasicParsing -Uri "https://codeload.github.com/$repo/zip/$sha" -OutFile $zip -Headers $headers
+            }
             if (Test-Path $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
             Expand-Archive -LiteralPath $zip -DestinationPath $staging
             # The archive holds a single top-level directory, <repo>-<sha>.

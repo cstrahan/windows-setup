@@ -31,11 +31,17 @@ From a clone, run `bootstrap.cmd` directly instead.
      you rather than Administrators
    - relaunches itself elevated (one UAC prompt) for the elevated section:
      - registers winget if needed, and upgrades it
+     - makes sure `winget configure` works: it stops with an explanation if Group Policy
+       disables it, installs the Visual C++ runtime it needs, and runs `winget configure
+       --enable` if the subcommand is unavailable
      - installs or upgrades PowerShell 7 (the MSI, via winget)
      - runs `configure.ps1` in PowerShell 7
 3. **`configure.ps1`** (stage 2, PowerShell 7):
+   - logs a preflight line (Windows build, winget, PowerShell, free disk space), with a warning
+     if Windows is missing updates that WSLg needs
    - applies `configuration/windows.dsc.yaml` with `winget configure`, then any matching
-     hardware profiles
+     hardware profiles, then checks that what they installed (`git`, `go`, `uv`, `code`,
+     `scoop`) is on PATH
    - enables WSL 2 (reboot required the first time), installs the distro (default
      `Ubuntu`, the latest LTS; you create the Linux user interactively)
    - installs uv in the distro, and `ansible-core` plus the `ansible` collections as a uv tool

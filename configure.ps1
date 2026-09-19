@@ -44,6 +44,8 @@ $ScancodeMapKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layout'
 $CbsRebootPendingKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
 $WslFeatures = 'Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform'
 $WslProbeTimeout = 60  # seconds; a healthy `wsl --status` returns in well under this
+# Commands the winget stage (plus bootstrap.ps1's Scoop) should leave on PATH; checked afterwards.
+$ExpectedCommands = 'git', 'go', 'uv', 'code', 'scoop'
 $WslResetTimeout = 120
 
 # Ask wsl.exe for UTF-8 output instead of UTF-16LE (older builds ignore it; see Invoke-Native).
@@ -126,6 +128,61 @@ function ConvertFrom-NativeOutput([byte[]] $Bytes) {
 function Test-Administrator {
     $principal = [Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# --- preflight and post-checks ---------------------------------------------------------
+
+function Test-Kernel32Export([string] $Name) {
+    if (-not ('WindowsSetup.Kernel32' -as [type])) {
+        Add-Type -Namespace WindowsSetup -Name Kernel32 -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetModuleHandleW(string name);
+[DllImport("kernel32.dll", CharSet = CharSet.Ansi, BestFitMapping = false)] public static extern IntPtr GetProcAddress(IntPtr module, string name);
+'@
+    }
+    $kernel32 = [WindowsSetup.Kernel32]::GetModuleHandleW('kernel32.dll')
+    return [WindowsSetup.Kernel32]::GetProcAddress($kernel32, $Name) -ne [IntPtr]::Zero
+}
+
+# Logs the machine's state up front; diagnostics only, never fails the run. (Idea from
+# microsoft/WindowsDeveloperConfig's preflight.ps1.)
+function Write-Preflight {
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem
+        $version = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+        $winget = (Invoke-Native winget.exe @('--version') -Capture -AllowFailure).Output.Trim()
+        $free = [Math]::Round((Get-PSDrive C).Free / 1GB, 1)
+        Write-Step ("Preflight: $($os.Caption) $($version.DisplayVersion) (build $($version.CurrentBuild).$($version.UBR)), " +
+            "winget $winget, PowerShell $($PSVersionTable.PSVersion), C: $free GB free")
+    } catch {
+        Write-Step "Preflight: couldn't collect everything: $($_.Exception.Message)"
+    }
+    # WSL's Remote Desktop client (used by WSLg to show Linux GUI apps) imports GetTempPath2W,
+    # which Windows 10 only gained in its March 2025 updates.
+    if (-not (Test-Kernel32Export 'GetTempPath2W')) {
+        Write-Step ('Warning: Windows is missing its March 2025 or later cumulative updates (kernel32 has no ' +
+            'GetTempPath2W), so WSLg cannot display Linux GUI apps. Install the latest updates from Windows Update.')
+    }
+}
+
+# Windows installers update PATH in the registry, not in running processes, so reload it before
+# looking for what they installed. PSModulePath is left alone: PowerShell 7 builds its own.
+# (From microsoft/WindowsDeveloperConfig's refresh-path.ps1.)
+function Update-SessionPath {
+    foreach ($name in 'Path', 'PATHEXT') {
+        $entries = @([Environment]::GetEnvironmentVariable($name, 'Machine'), [Environment]::GetEnvironmentVariable($name, 'User')) -split ';' |
+            Where-Object { $_ } | Select-Object -Unique
+        Set-Item -Path "env:$name" -Value ($entries -join ';')
+    }
+}
+
+# Post-condition for the winget stage: what it installed should now be usable.
+function Assert-ExpectedCommands {
+    Update-SessionPath
+    $missing = @($ExpectedCommands | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
+    if ($missing) {
+        throw "installed, but not found on PATH: $($missing -join ', ')"
+    }
+    Write-Step "On PATH: $($ExpectedCommands -join ', ')"
 }
 
 # --- winget configuration --------------------------------------------------------------
@@ -332,6 +389,7 @@ function Invoke-Configure {
     if (-not (Test-Administrator)) {
         throw 'must run elevated (use bootstrap.cmd, which elevates for you)'
     }
+    Write-Preflight
     if (-not $SkipWinget) {
         $scancodeMap = Get-ScancodeMap
         Invoke-WingetConfiguration $WingetConfig
@@ -339,6 +397,7 @@ function Invoke-Configure {
             Write-Step 'Note: the keyboard remapping (Scancode Map) changed; it takes effect after a restart.'
         }
         Invoke-HardwareConfiguration
+        Assert-ExpectedCommands
     }
     if (-not $SkipWsl) {
         Initialize-Wsl $Distro

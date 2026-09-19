@@ -80,24 +80,41 @@ Gotchas:
   your shell were visible to winget's (unsandboxed) process. So things that write only to
   `~\...` and the registry, like Scoop's installer, can run from your shell, so the bootstrap's
   unelevated section can be tested from here.
-- **Starting WSL from your (sandboxed) shells leaves broken WSLg clients behind.** Each distro
-  start spawns WSLg's `msrdc.exe` (a Remote Desktop client). Started from the Claude app's
-  sandbox, including elevated children, those clients showed recurring "Could not load the Remote
-  Desktop Services ActiveX control (rdclientax.dll)" and "RemoteApp … unable to connect" pop-ups
-  for the user (2026-09-18: six of them, one per WSL-touching test run). Started outside the
-  sandbox (via winget's process), the client lingered silently, which is normal. So use `-SkipWsl`
-  for routine runs. If WSL must be exercised, note the time first, and afterwards stop the
-  `msrdc.exe` processes started since then, elevated (`taskkill /F /PID ...`; wslservice launches
-  them, so unelevated gets Access denied). Tell the user.
+- **WSLg's Remote Desktop client (`msrdc.exe`) can't load on this machine as of 2026-09-18.**
+  WSL 2.7.14's `rdclientax.dll` imports `kernel32!GetTempPath2W`, which Windows 10 only has from
+  the March 2025 updates, and this laptop was on January 2025's (19045.5371). Symptoms:
+  - Linux GUI apps (e.g. `xeyes`) never appear; Weston logs `rdp_peer is not initalized` in
+    `/mnt/wslg/weston.log`.
+  - WSLg relaunches `msrdc.exe` repeatedly (`/mnt/wslg/stderr.log`).
+  - WSL started from your shells also showed recurring "Could not load the Remote Desktop
+    Services ActiveX control (rdclientax.dll)" / "RemoteApp … unable to connect" pop-ups; from
+    the user's own launches the client fails quietly in `/silent` mode.
+
+  Diagnose by loading the DLL (`LoadLibraryEx` gives error 127 = procedure not found) and
+  checking its imports with `GetProcAddress`. The fix is the latest cumulative update
+  (KB5066791, October 2025, the last free one for Windows 10 22H2). It was downloaded but not
+  installed; the user was told. Until that's installed, use `-SkipWsl` for routine runs. If WSL
+  must be exercised, stop the `msrdc.exe` processes it leaves behind afterwards, elevated
+  (`taskkill /F /PID ...`; wslservice launches them, so unelevated gets Access denied), and tell
+  the user.
 - **Redirected runs aren't interactive.** The distro install (`wsl --install -d ...`) prompts for
   a Linux username/password, so that step has to be run by the user in a real terminal.
 - **Windows PowerShell 5.1 gotchas** (bootstrap.ps1): `& exe | Select-Object -First 1` stops the
   pipeline early and leaves `$LASTEXITCODE` from the *previous* command, so capture all output
-  first. In any PowerShell, `-replace 'a', 'b'` inside a method call's parentheses splits into
+  first. `Get-ItemPropertyValue -ErrorAction SilentlyContinue` still *throws* when the key exists
+  but the value doesn't; use `Get-RegistryValue` (bootstrap.ps1). In any PowerShell, `-replace 'a', 'b'` inside a method call's parentheses splits into
   two method arguments; compute it into a variable first.
 - **PowerShell 7 must be the MSI.** winget's `Microsoft.PowerShell` defaults to the MSIX build
   (per-user, sandboxed, only a `WindowsApps\pwsh.exe` alias), so bootstrap passes
   `--installer-type wix --scope machine`.
+- **Faking failures for tests:** `bootstrap.ps1` and `configure.ps1` can both be dot-sourced to
+  just define their functions. Their paths are script variables, so point `$ConfigurePolicyKey` /
+  `$VCRedistKey` at a scratch key under `HKCU:` (and remove it afterwards). In PowerShell a
+  function beats an executable of the same name, so `function winget.exe { ... }` stands in for
+  winget (setting `$global:LASTEXITCODE`) to exercise the "configure disabled" paths. The
+  `winget configure` guards, retries, preflight and PATH checks borrow ideas from
+  microsoft/WindowsDeveloperConfig's `src/Workloads/_common` (MIT). Its scripts weren't vendored
+  because they're tied to that repo's CI and Command Palette tooling.
 - **Unelevated checks you can run directly:**
   - `pwsh -File <test script>` that dot-sources `configure.ps1`, then calls its functions
     (`Get-Hardware`, `Test-HardwareProfile` with faked hardware, `Invoke-Native`, the WSL

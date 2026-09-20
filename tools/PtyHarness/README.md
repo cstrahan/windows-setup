@@ -28,7 +28,7 @@ as escape sequences, as an HTML page, or as structured runs with their colours �
 | | [ConsoleHarness](../ConsoleHarness/README.md) | PtyHarness |
 |---|---|---|
 | How the screen is read | conhost renders it; we read the character grid | we render the VT stream ourselves |
-| Dependencies | none (Win32 only) | wasmtime + a vendored wasm, ~22 MB |
+| Dependencies | none (Win32 only) | wasmtime, a vendored wasm and a console host, ~23 MB |
 | Works before the machine is set up | yes | no |
 | Mouse | injects `INPUT_RECORD`s or types SGR, per application | SGR only; the console host adapts |
 | Fidelity | conhost's, including its quirks | a real terminal's: reflow, scrollback, styles |
@@ -59,30 +59,54 @@ host adapts — it turns them into `INPUT_RECORD`s for an application that reads
 passes them through for one that parses VT itself — which is a terminal's job, and why nothing
 here needs to know which kind an application is.
 
-That only holds with **Windows Terminal's console host**. `CreatePseudoConsole` binds to the
-machine's inbox conhost (10.0.19041.1 here), which forwards no mouse in either direction: a client
-enabling `ENABLE_MOUSE_INPUT` produced no request outward and injected reports produced no records.
-Windows Terminal doesn't use it either; it ships `OpenConsole.exe` (1.21.2502.04001) and launches
-that as its pty host, which has the plumbing — `src/host/getset.cpp:383` asks the terminal for
-mouse, `src/terminal/parser/InputStateMachineEngine.cpp:402` converts the reports back.
+That only holds with a **current console host**. `kernel32!CreatePseudoConsole` binds to the
+machine's own conhost — 10.0.19041.1 here, which is Windows 10 2004, from 2020 — and it forwards
+no mouse in either direction: a client enabling `ENABLE_MOUSE_INPUT` produced no request outward,
+and injected reports produced no records. A newer host has the plumbing
+(`src/host/getset.cpp:383` asks the terminal for mouse,
+`src/terminal/parser/InputStateMachineEngine.cpp:402` converts the reports back).
 
-So `Start-PtyProcess` hosts the pty itself rather than calling `CreatePseudoConsole`, following
-`winconpty`: open `\Device\ConDrv\Server` and its `\Reference` child through `NtOpenFile`, spawn
-`OpenConsole.exe --headless --width --height --signal --server` with exactly four handles
-inherited, then start the application with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`. Resizes go down
-the signal pipe as a packet, since `ResizePseudoConsole` only knows about consoles kernel32 made.
+Microsoft ships one for exactly this, and it is not a Windows Terminal thing:
+**`Microsoft.Windows.Console.ConPTY`** on nuget.org, MIT, built from microsoft/terminal, described
+as working "on all versions of Windows 10.0.17763.0 and above". It carries `conpty.dll`, whose
+`ConptyCreatePseudoConsole` is `CreatePseudoConsole` against a bundled `OpenConsole.exe`. The
+`pty-harness` workload fetches both into `lib\` with the hash pinned, and `Start-PtyProcess`
+prefers them; `-ConsoleHost Inbox` forces kernel32's, and `$env:PTYHARNESS_CONPTY_DLL` points the
+library somewhere else.
 
-Two things that cost time, in case they come up again:
+The difference, measured with one wheel event into full-screen fzf:
 
-- **That attribute takes an `HPCON`, not a handle.** An `HPCON` points at a
-  `{ hSignal, hPtyReference, hConPtyProcess }` struct, which the OS dereferences; passing the
-  reference handle directly makes it read a bogus pointer and **crashes the calling process**
-  (0xC0000005 inside `CreateProcessW`) rather than failing.
-- **OpenConsole cannot be run from where Windows Terminal keeps it.** Executing anything inside
-  `C:\Program Files\WindowsApps` from outside the package fails with "Access is denied", so
-  `Get-OpenConsolePath` copies it next to the harness (`lib\OpenConsole.exe`, gitignored) and
-  refreshes the copy when Terminal's version changes. `$env:PTYHARNESS_CONSOLE_HOST` overrides,
-  and `Start-PtyProcess -ConsoleHost Inbox` uses `CreatePseudoConsole` instead.
+| Host | Selection |
+|---|---|
+| inbox conhost | `item 1` → `item 1` |
+| `conpty.dll` + OpenConsole 1.24 | `item 1` → `item 6` |
+
+This is what node-pty does too — it vendors the same two binaries — except that its `useConptyDll`
+flag **defaults to false**, so anything using node-pty as it comes gets the inbox host and this
+same gap. VS Code opts in.
+
+Two things worth knowing:
+
+- **conpty.dll falls back to the inbox conhost, silently.** `_ConsoleHostPath` in
+  `winconpty.cpp` looks for `OpenConsole.exe` beside the loaded module, then in an architecture
+  subdirectory (`x64\`), and if neither is there it quietly uses `conhost.exe` — costing mouse with
+  no error anywhere. So `Get-ConptyLibraryPath` requires *both* files before reporting the library
+  as usable, and a test asserts an `OpenConsole.exe` process is really serving the pty.
+- **The library has to be loaded by full path first.** `lib\` is on no search path, so
+  `Initialize-Conpty` calls `NativeLibrary.Load`; after that the bare `[DllImport("conpty.dll")]`
+  in `PtyNative.cs` resolves to the module already in the process. Loading it from `lib\` is also
+  what makes it find the `OpenConsole.exe` we fetched, since it resolves the host relative to its
+  own module path.
+
+Before this, the harness hosted the pty by hand — `\Device\ConDrv\Server` and its `\Reference`
+child through `NtOpenFile`, `OpenConsole.exe --headless --signal --server`, resize packets down
+the signal pipe — with the binary copied out of `C:\Program Files\WindowsApps` (Windows refuses to
+execute anything in there from outside the package). `ConptyCreatePseudoConsole` does all of that,
+so those 343 lines of interop went away. One trap from it is worth keeping, because the package
+exposes the same structure through `ConptyPackPseudoConsole`: an `HPCON` is not a handle, it points
+at a `{ hSignal, hPtyReference, hConPtyProcess }` struct, and passing a bare handle to
+`PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` makes the OS read a bogus pointer and **crash the calling
+process** (0xC0000005 inside `CreateProcessW`) rather than fail.
 
 ## The screen, and what has scrolled off
 
@@ -201,15 +225,14 @@ space written after an attribute reset can come back carrying the old attribute.
 | `PtyHarness.psm1` | the cmdlets, and the encoder from key events to terminal bytes |
 | `PtyHost.ps1` | the resident host: pty, emulator, named-pipe server |
 | `PtyNative.ps1` | picks the console host, and wraps the interop |
-| `PtyNative.cs` | ConPTY through `CreatePseudoConsole` (the inbox host) |
-| `PtyNativeOpenConsole.cs` | a pty hosted by Windows Terminal's OpenConsole, winconpty's way |
+| `PtyNative.cs` | ConPTY interop, against either `conpty.dll` or kernel32 |
 | `Ghostty.ps1` | libghostty-vt in wasmtime: write bytes, read the screen, resize |
 | `GhosttyReplySink.cs` | the callback that collects the terminal's answers to a program's queries |
 | `GhosttyScreenReader.cs` | the cell walk: colours, attributes, and coalescing them into runs |
 | `QueryProbe.ps1` | a fixture that asks the terminal a question and prints the answer |
 | `ColourProbe.ps1` | a fixture that draws a screen with known colours and attributes |
 | `vendor/` | the emulator itself, and where it came from |
-| `lib/` | wasmtime, fetched by the `pty-harness` workload (gitignored) |
+| `lib/` | wasmtime and the console host, fetched by the `pty-harness` workload (gitignored) |
 
 ## Tests
 

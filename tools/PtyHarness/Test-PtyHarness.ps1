@@ -40,13 +40,17 @@ Test-Case 'a program runs, takes keys, and its output is rendered' {
     }
 }
 
-Test-Case 'the console host is Windows Terminal OpenConsole when it can be found' {
+Test-Case 'the pty is served by the redistributable console host' {
     Use-Pty 'cmd.exe' 80 24 'Microsoft Windows' {
         param($session)
         $info = Get-PtyInfo $session
-        # The inbox host works for everything except mouse, so this is a warning sign rather than
-        # a hard requirement; the mouse tests below are what actually depend on it.
-        Assert-Equal $true ($info.consoleHost -match 'OpenConsole|inbox') "host was '$($info.consoleHost)'"
+        Assert-Equal $true ($info.consoleHost -match 'conpty\.dll$') "host was '$($info.consoleHost)'"
+        # Say that we asked for it and believe what actually happened: conpty.dll falls back to the
+        # machine's conhost without a word when OpenConsole.exe isn't beside it, and that fallback
+        # costs mouse. The host process is a child of the session's host process.
+        $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($session.HostProcessId)")
+        $names = ($children | ForEach-Object { $_.Name }) -join ', '
+        Assert-Equal $true ($names -match 'OpenConsole\.exe') "expected OpenConsole.exe to be serving the pty; children were: $names"
     }
 }
 

@@ -534,10 +534,15 @@ The earlier `nvim-data` (only shada/swap from Neovim 0.10) is at `nvim-data.bak`
 - **`tools\PtyHarness` runs programs under a pseudo console** and renders the VT stream with
   libghostty-vt in wasmtime, for when genuine terminal behaviour matters (reflow, scrollback, VT
   semantics) rather than conhost's rendering of it. Mouse there needs no per-application choice:
-  send SGR and the console host adapts. **It hosts the pty with Windows Terminal's OpenConsole**,
-  not `CreatePseudoConsole`, because the inbox conhost on this machine forwards no mouse at all;
-  the host binary is copied to `tools\PtyHarness\lib` since Windows refuses to execute anything
-  inside `WindowsApps` from outside the package. `Get-PtyScreen` gives the
+  send SGR and the console host adapts. **It hosts the pty with the redistributable console host**
+  (`Microsoft.Windows.Console.ConPTY` on nuget.org, MIT, from microsoft/terminal), not
+  `kernel32!CreatePseudoConsole`, because this machine's inbox conhost (10.0.19041.1, from 2020)
+  forwards no mouse at all. The `pty-harness` workload fetches `conpty.dll` and `OpenConsole.exe`
+  into `tools\PtyHarness\lib` with the hash pinned; `conpty.dll` **falls back to the inbox conhost
+  silently** if `OpenConsole.exe` isn't beside it, so both are required before it's used, and a
+  test asserts an OpenConsole process really is serving the pty. (node-pty vendors the same two
+  binaries but defaults to the kernel32 path, so anything using it as it comes has the same gap.)
+  `Get-PtyScreen` gives the
   viewport and `-Scrollback` the history (the formatter emits both together, so the split comes
   from asking the terminal how many rows scrolled off). Terminal queries are answered: a host
   function in the module's `__indirect_function_table` collects libghostty's replies and the host

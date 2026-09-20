@@ -31,6 +31,8 @@ namespace PtyHarness {
         public IntPtr PseudoConsole;
         public IntPtr ProcessHandle;
         public int ProcessId;
+        /// Which library owns PseudoConsole, since it has to be resized and closed by the same one.
+        public bool UsesConptyDll;
         /// What the program reads as its input.
         public FileStream Input;
         /// What the program writes: a VT stream, for a terminal emulator to interpret.
@@ -53,6 +55,18 @@ namespace PtyHarness {
         static extern int ResizePseudoConsole(IntPtr pseudoConsole, COORD size);
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern void ClosePseudoConsole(IntPtr pseudoConsole);
+
+        // The same three from the redistributable console host. kernel32's versions bind to the
+        // machine's own conhost, which on Windows 10 is far too old to forward mouse; these bind
+        // to the OpenConsole.exe sitting next to conpty.dll. The names differ because the package
+        // exports them under their own prefix (inc/conpty.h). PtyNative.ps1 loads the library from
+        // lib\ before any of these are called, which is what lets a bare name resolve here.
+        [DllImport("conpty.dll", SetLastError = true)]
+        static extern int ConptyCreatePseudoConsole(COORD size, IntPtr input, IntPtr output, uint flags, out IntPtr pseudoConsole);
+        [DllImport("conpty.dll", SetLastError = true)]
+        static extern int ConptyResizePseudoConsole(IntPtr pseudoConsole, COORD size);
+        [DllImport("conpty.dll", SetLastError = true)]
+        static extern void ConptyClosePseudoConsole(IntPtr pseudoConsole);
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool InitializeProcThreadAttributeList(IntPtr attributeList, int attributeCount, int flags, ref IntPtr size);
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -68,7 +82,7 @@ namespace PtyHarness {
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
 
-        public static PtyProcess Start(string commandLine, string workingDirectory, short columns, short rows) {
+        public static PtyProcess Start(string commandLine, string workingDirectory, short columns, short rows, bool useConptyDll) {
             IntPtr inputRead, inputWrite, outputRead, outputWrite;
             if (!CreatePipe(out inputRead, out inputWrite, IntPtr.Zero, 0)) {
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "CreatePipe (input) failed");
@@ -78,11 +92,16 @@ namespace PtyHarness {
             }
 
             IntPtr pseudoConsole;
-            int hr = CreatePseudoConsole(new COORD { X = columns, Y = rows }, inputRead, outputWrite, 0, out pseudoConsole);
+            var consoleSize = new COORD { X = columns, Y = rows };
+            int hr = useConptyDll
+                ? ConptyCreatePseudoConsole(consoleSize, inputRead, outputWrite, 0, out pseudoConsole)
+                : CreatePseudoConsole(consoleSize, inputRead, outputWrite, 0, out pseudoConsole);
             // The pseudo console keeps its own duplicates of the ends it was given.
             CloseHandle(inputRead);
             CloseHandle(outputWrite);
-            if (hr != 0) { throw new Win32Exception(hr, "CreatePseudoConsole failed"); }
+            if (hr != 0) {
+                throw new Win32Exception(hr, (useConptyDll ? "ConptyCreatePseudoConsole" : "CreatePseudoConsole") + " failed");
+            }
 
             IntPtr size = IntPtr.Zero;
             InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);   // asks for the size
@@ -110,13 +129,14 @@ namespace PtyHarness {
             DeleteProcThreadAttributeList(attributes);
             Marshal.FreeHGlobal(attributes);
             if (!started) {
-                ClosePseudoConsole(pseudoConsole);
+                Close(pseudoConsole, useConptyDll);
                 throw new Win32Exception(error, "CreateProcess failed for: " + commandLine);
             }
             CloseHandle(processInformation.hThread);
 
             return new PtyProcess {
                 PseudoConsole = pseudoConsole,
+                UsesConptyDll = useConptyDll,
                 ProcessHandle = processInformation.hProcess,
                 ProcessId = processInformation.dwProcessId,
                 Input = new FileStream(new SafeFileHandle(inputWrite, true), FileAccess.Write),
@@ -125,8 +145,15 @@ namespace PtyHarness {
         }
 
         public static void Resize(PtyProcess pty, short columns, short rows) {
-            int hr = ResizePseudoConsole(pty.PseudoConsole, new COORD { X = columns, Y = rows });
+            var size = new COORD { X = columns, Y = rows };
+            int hr = pty.UsesConptyDll
+                ? ConptyResizePseudoConsole(pty.PseudoConsole, size)
+                : ResizePseudoConsole(pty.PseudoConsole, size);
             if (hr != 0) { throw new Win32Exception(hr, "ResizePseudoConsole failed"); }
+        }
+
+        static void Close(IntPtr pseudoConsole, bool useConptyDll) {
+            if (useConptyDll) { ConptyClosePseudoConsole(pseudoConsole); } else { ClosePseudoConsole(pseudoConsole); }
         }
 
         public static bool HasExited(PtyProcess pty) {
@@ -140,7 +167,7 @@ namespace PtyHarness {
             if (pty == null) { return; }
             // Closing the pseudo console tells the program its terminal is gone, which is how a
             // shell is asked to leave; terminate anything that stays.
-            if (pty.PseudoConsole != IntPtr.Zero) { ClosePseudoConsole(pty.PseudoConsole); pty.PseudoConsole = IntPtr.Zero; }
+            if (pty.PseudoConsole != IntPtr.Zero) { Close(pty.PseudoConsole, pty.UsesConptyDll); pty.PseudoConsole = IntPtr.Zero; }
             try { if (pty.Input != null) { pty.Input.Dispose(); } } catch { }
             try { if (pty.Output != null) { pty.Output.Dispose(); } } catch { }
             if (pty.ProcessHandle != IntPtr.Zero) {

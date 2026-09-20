@@ -4,55 +4,62 @@
 # it has a console, and we get the VT stream it draws with, rather than a rendered character grid.
 # That's the whole difference from ConsoleHarness, which reads conhost's grid instead.
 #
-# Two hosts are possible. CreatePseudoConsole uses the machine's inbox conhost, which on Windows
-# 10 has no mouse plumbing; Windows Terminal ships OpenConsole.exe and hosts its pty with that,
-# which is why mouse works there. Start-PtyProcess prefers OpenConsole when it can be found.
+# Which console host serves the pty is the thing that matters here. kernel32's CreatePseudoConsole
+# binds to the machine's own conhost - 10.0.19041.1 on this laptop, from 2020 - which has no mouse
+# plumbing at all: a client asking for mouse gets nothing, and injected reports produce nothing.
+# Microsoft ships a current one for exactly this case, as the MIT-licensed
+# Microsoft.Windows.Console.ConPTY package (conpty.dll plus OpenConsole.exe, built from
+# microsoft/terminal). The pty-harness workload fetches it into lib\, and this prefers it.
+#
+# That is also what node-pty does, and so VS Code: it vendors the same two binaries and picks
+# between kernel32 and conpty.dll with a `useConptyDll` flag. Its default is still kernel32, so
+# anything using node-pty as it comes has the same gap.
 #
 # Dot-source this; it defines Start-PtyProcess, Resize-PtyProcess and Stop-PtyProcess.
 
-# The interop lives in .cs files next to this one and compiles as one assembly: PtyNativeOpenConsole
-# needs the structs in PtyNative, and Add-Type can only see types from other files compiled with it.
 if (-not ('PtyHarness.Native' -as [type])) {
-    Add-Type -Path (Join-Path $PSScriptRoot 'PtyNative.cs'), (Join-Path $PSScriptRoot 'PtyNativeOpenConsole.cs')
+    Add-Type -Path (Join-Path $PSScriptRoot 'PtyNative.cs')
 }
 
-function Get-OpenConsolePath {
+$script:ConptyDirectory = Join-Path $PSScriptRoot 'lib'
+
+function Get-ConptyLibraryPath {
     <#
     .SYNOPSIS
-    Returns a runnable OpenConsole.exe, copying Windows Terminal's out of its package if needed.
+    Returns the redistributable conpty.dll if it is present and usable, otherwise $null.
 
     .DESCRIPTION
-    Windows Terminal ships the console host that knows how to do mouse, but it lives in the
-    package directory, where Windows refuses to execute it for anyone outside the package
-    ("Access is denied"). So it is copied next to the harness and run from there. The copy is
-    refreshed when Terminal's version changes, and never committed - it is Microsoft's binary,
-    already on this machine.
+    conpty.dll looks for OpenConsole.exe next to itself, then in an architecture subdirectory,
+    and if it finds neither it falls back to the inbox conhost (winconpty.cpp, _ConsoleHostPath).
+    That fallback is silent and would cost us mouse, so both files are required here rather than
+    just the library.
 
-    $env:PTYHARNESS_CONSOLE_HOST overrides all of this.
+    $env:PTYHARNESS_CONPTY_DLL overrides the location.
     #>
     [CmdletBinding()]
     param()
 
-    if ($env:PTYHARNESS_CONSOLE_HOST) { return $env:PTYHARNESS_CONSOLE_HOST }
-    if ($script:OpenConsolePath) { return $script:OpenConsolePath }
+    $library = if ($env:PTYHARNESS_CONPTY_DLL) { $env:PTYHARNESS_CONPTY_DLL } else { Join-Path $script:ConptyDirectory 'conpty.dll' }
+    if (-not (Test-Path -LiteralPath $library)) { return $null }
+    # Not $host: that is an automatic variable.
+    $consoleHostExe = Join-Path (Split-Path -Parent $library) 'OpenConsole.exe'
+    if (-not (Test-Path -LiteralPath $consoleHostExe)) { return $null }
+    return $library
+}
 
-    # Appx doesn't load in PowerShell 7 ("Operation is not supported on this platform"), so ask
-    # Windows PowerShell, which is always there. Listing WindowsApps directly needs permissions an
-    # ordinary user hasn't got.
-    $installed = powershell.exe -NoProfile -Command "(Get-AppxPackage Microsoft.WindowsTerminal | Sort-Object Version | Select-Object -Last 1).InstallLocation" 2>$null
-    if (-not $installed) { return $null }
-    $source = Join-Path $installed.Trim() 'OpenConsole.exe'
-    if (-not (Test-Path -LiteralPath $source)) { return $null }
-
-    $local = Join-Path (Join-Path $PSScriptRoot 'lib') 'OpenConsole.exe'
-    $sourceVersion = (Get-Item -LiteralPath $source).VersionInfo.FileVersion
-    $localVersion = if (Test-Path -LiteralPath $local) { (Get-Item -LiteralPath $local).VersionInfo.FileVersion } else { $null }
-    if ($localVersion -ne $sourceVersion) {
-        [void] (New-Item -ItemType Directory -Force -Path (Split-Path -Parent $local))
-        Copy-Item -LiteralPath $source -Destination $local -Force
-    }
-    $script:OpenConsolePath = $local
-    return $local
+function Initialize-Conpty {
+    <#
+    .SYNOPSIS
+    Loads conpty.dll so that PtyNative.cs's [DllImport("conpty.dll")] resolves to our copy.
+    #>
+    param([Parameter(Mandatory)] [string] $Path)
+    if ($script:ConptyLoaded) { return }
+    # Loading by full path puts the module in the process under its plain name, which is what the
+    # bare DllImport then finds; lib\ is on no search path. (Ghostty.ps1 loads wasmtime the same
+    # way.) Loading the library is also what fixes OpenConsole's directory: conpty.dll resolves
+    # the host relative to its own module path, so it finds the one we fetched beside it.
+    [void] [Runtime.InteropServices.NativeLibrary]::Load($Path)
+    $script:ConptyLoaded = $true
 }
 
 function Start-PtyProcess {
@@ -69,40 +76,32 @@ function Start-PtyProcess {
         [string] $WorkingDirectory = $PWD.Path,
         [int] $Columns = 120,
         [int] $Rows = 30,
-        # OpenConsole is Windows Terminal's host and handles mouse; Inbox is whatever
-        # CreatePseudoConsole gives us. Auto takes OpenConsole when it can be found.
-        [ValidateSet('Auto', 'OpenConsole', 'Inbox')] [string] $ConsoleHost = 'Auto'
+        # Conpty is the redistributable host from lib\ and handles mouse; Inbox is whatever
+        # kernel32's CreatePseudoConsole gives us, which here forwards none. Auto takes Conpty
+        # when the workload has fetched it.
+        [ValidateSet('Auto', 'Conpty', 'Inbox')] [string] $ConsoleHost = 'Auto'
     )
-    $hostPath = if ($ConsoleHost -ne 'Inbox') { Get-OpenConsolePath } else { $null }
-    if ($ConsoleHost -eq 'OpenConsole' -and -not $hostPath) {
-        throw 'OpenConsole.exe was not found. It ships with Windows Terminal; set $env:PTYHARNESS_CONSOLE_HOST to point at one.'
+    $library = if ($ConsoleHost -ne 'Inbox') { Get-ConptyLibraryPath } else { $null }
+    if ($ConsoleHost -eq 'Conpty' -and -not $library) {
+        throw "conpty.dll and OpenConsole.exe were not found in $script:ConptyDirectory. The pty-harness workload fetches them: apply configuration\workloads\pty-harness.dsc.yaml (it needs no elevation)."
     }
-    if ($hostPath) {
-        $pty = [PtyHarness.OpenConsoleHost]::Start($hostPath, $CommandLine, $WorkingDirectory, [short] $Columns, [short] $Rows)
-        Add-Member -InputObject $pty -NotePropertyName ConsoleHost -NotePropertyValue $hostPath -Force
-        return $pty
-    }
-    $pty = [PtyHarness.Native]::Start($CommandLine, $WorkingDirectory, [short] $Columns, [short] $Rows)
-    Add-Member -InputObject $pty -NotePropertyName ConsoleHost -NotePropertyValue 'inbox' -Force
+    if ($library) { Initialize-Conpty -Path $library }
+
+    $pty = [PtyHarness.Native]::Start($CommandLine, $WorkingDirectory, [short] $Columns, [short] $Rows, [bool] $library)
+    $description = if ($library) { $library } else { 'inbox' }
+    Add-Member -InputObject $pty -NotePropertyName ConsoleHost -NotePropertyValue $description -Force
     return $pty
 }
 
 function Resize-PtyProcess {
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Pty, [Parameter(Mandatory)] [int] $Columns, [Parameter(Mandatory)] [int] $Rows)
-    # A hosted pty is resized by a packet down its signal pipe; ResizePseudoConsole only knows
-    # about consoles the kernel32 path created.
-    if ($Pty -is [PtyHarness.HostedPty]) {
-        [PtyHarness.OpenConsoleHost]::Resize($Pty, [short] $Columns, [short] $Rows)
-    } else {
-        [PtyHarness.Native]::Resize($Pty, [short] $Columns, [short] $Rows)
-    }
+    [PtyHarness.Native]::Resize($Pty, [short] $Columns, [short] $Rows)
 }
 
 function Test-PtyProcessExited {
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Pty)
-    if ($Pty -is [PtyHarness.HostedPty]) { return [PtyHarness.OpenConsoleHost]::HasExited($Pty) }
     return [PtyHarness.Native]::HasExited($Pty)
 }
 
@@ -120,9 +119,5 @@ function Stop-PtyProcess {
     [CmdletBinding()]
     param([Parameter(Mandatory)] $Pty)
     if ($Pty.ProcessId) { Stop-PtyProcessTree -Id $Pty.ProcessId }
-    if ($Pty -is [PtyHarness.HostedPty]) {
-        [PtyHarness.OpenConsoleHost]::Stop($Pty)
-    } else {
-        [PtyHarness.Native]::Stop($Pty)
-    }
+    [PtyHarness.Native]::Stop($Pty)
 }

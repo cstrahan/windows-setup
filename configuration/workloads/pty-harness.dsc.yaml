@@ -1,4 +1,5 @@
-# Runtime for the pty test harness (tools\PtyHarness): a WebAssembly engine to run libghostty-vt.
+# Runtime for the pty test harness (tools\PtyHarness): a WebAssembly engine to run libghostty-vt,
+# and the console host that serves the pseudo console.
 #
 # The terminal emulator itself is vendored (tools\PtyHarness\vendor), because Ghostty publishes
 # wasm only on a rolling nightly; see that folder's README. What can't be vendored is wasmtime's
@@ -31,3 +32,30 @@ resources:
     dependsOn:
       # One download, two members: let the first one populate the cache.
       - "[resourceId('WindowsSetup.WebFile/WebFile', 'wasmtimeManaged')]"
+
+  # The console host. The machine's own conhost (10.0.19041.1 here, from 2020) has no mouse
+  # plumbing, so a pty hosted by it silently forwards nothing; Microsoft ships a newer one for
+  # exactly this, as the MIT-licensed Microsoft.Windows.Console.ConPTY package out of
+  # microsoft/terminal ("should work on all versions of Windows 10.0.17763.0 and above"). This is
+  # what node-pty, and so VS Code, uses as well.
+  #
+  # conpty.dll looks for OpenConsole.exe beside itself, then in an architecture subdirectory, and
+  # FALLS BACK TO THE INBOX CONHOST if it finds neither (winconpty.cpp, _ConsoleHostPath) - which
+  # would be silent, so both files must land in lib\ together.
+  - name: conptyLibrary
+    type: WindowsSetup.WebFile/WebFile
+    properties:
+      Uri: https://api.nuget.org/v3-flatcontainer/microsoft.windows.console.conpty/1.24.260710001/microsoft.windows.console.conpty.1.24.260710001.nupkg
+      Sha256: 175640566A3B59C4B132070EE96C2C77E5AB7EDD2E92732A5EB3610BBF63D90E
+      ArchiveMember: runtimes/win-x64/native/conpty.dll
+      Destination: "[concat(parameters('repoRoot'), '\\tools\\PtyHarness\\lib\\conpty.dll')]"
+
+  - name: conptyHost
+    type: WindowsSetup.WebFile/WebFile
+    properties:
+      Uri: https://api.nuget.org/v3-flatcontainer/microsoft.windows.console.conpty/1.24.260710001/microsoft.windows.console.conpty.1.24.260710001.nupkg
+      Sha256: 175640566A3B59C4B132070EE96C2C77E5AB7EDD2E92732A5EB3610BBF63D90E
+      ArchiveMember: build/native/runtimes/x64/OpenConsole.exe
+      Destination: "[concat(parameters('repoRoot'), '\\tools\\PtyHarness\\lib\\OpenConsole.exe')]"
+    dependsOn:
+      - "[resourceId('WindowsSetup.WebFile/WebFile', 'conptyLibrary')]"

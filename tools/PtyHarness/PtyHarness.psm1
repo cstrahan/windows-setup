@@ -263,14 +263,20 @@ function Get-PtyScreen {
     <#
     .SYNOPSIS
     Returns the screen as the program has drawn it, one string per row.
+
+    .DESCRIPTION
+    The visible rows by default. With -Scrollback, everything the terminal still holds, oldest
+    first, which is what has scrolled off plus what is on screen.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory, Position = 0, ValueFromPipeline)] [PSTypeName('PtyHarness.Session')] $Session,
+        # Include what has scrolled out of view.
+        [switch] $Scrollback,
         [switch] $NonEmpty
     )
     process {
-        $response = Invoke-HostRequest -Session $Session -Request @{ op = 'screen' }
+        $response = Invoke-HostRequest -Session $Session -Request @{ op = 'screen'; scrollback = [bool] $Scrollback }
         $lines = @($response.lines)
         if ($NonEmpty) { $lines = @($lines | Where-Object { $_.Trim() }) }
         return $lines

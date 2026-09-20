@@ -526,9 +526,12 @@ The earlier `nvim-data` (only shada/swap from Neovim 0.10) is at `nvim-data.bak`
   send SGR and the console host adapts. **It hosts the pty with Windows Terminal's OpenConsole**,
   not `CreatePseudoConsole`, because the inbox conhost on this machine forwards no mouse at all;
   the host binary is copied to `tools\PtyHarness\lib` since Windows refuses to execute anything
-  inside `WindowsApps` from outside the package. Remaining gaps are in its README: the screen read
-  includes scrollback, and terminal queries go unanswered (the fix is a host function in the
-  module's `__indirect_function_table`, since the wasm has no imports to hang a callback on).
+  inside `WindowsApps` from outside the package. `Get-PtyScreen` gives the
+  viewport and `-Scrollback` the history (the formatter emits both together, so the split comes
+  from asking the terminal how many rows scrolled off). **Terminal queries still go unanswered**,
+  and the obvious fix is blocked: a host function can be installed in the module's
+  `__indirect_function_table` and accepted as the callback, but invoking it crashes the process
+  outright - reproduced from PowerShell and from plain C#, so don't assume it's the binding.
 - **`tools\ConsoleHarness` now makes TUI behaviour testable** (fzf, Neovim), so verify interactive
   changes yourself instead of asking the user to try them.
 

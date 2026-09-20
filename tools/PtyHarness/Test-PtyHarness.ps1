@@ -64,6 +64,21 @@ Test-Case 'resizing tells the program, which redraws for the new size' {
     }
 }
 
+Test-Case 'the screen is the viewport, and -Scrollback is everything' {
+    # More output than fits, so some of it has scrolled off.
+    Use-Pty 'cmd.exe' 80 10 'Microsoft Windows' {
+        param($session)
+        Send-PtyKeys $session 'for /L %i in (1,1,30) do @echo line %i{Enter}' -SettleMilliseconds 1200 | Out-Null
+        $visible = @(Get-PtyScreen $session -NonEmpty)
+        $everything = @(Get-PtyScreen $session -Scrollback -NonEmpty)
+        Assert-Equal $true ($visible.Count -le 10) "the viewport should fit the terminal, got $($visible.Count) rows"
+        Assert-Equal $true ($everything.Count -gt $visible.Count) 'scrollback should hold more than the viewport'
+        Assert-Equal $true (($everything -match '^line 1$') -ne $null) 'the first line should still be in scrollback'
+        Assert-Equal $false (($visible -match '^line 1$') -ne $null) 'but it should have scrolled out of view'
+        Assert-Equal $true (($visible -match '^line 30$') -ne $null) 'and the last line should be visible'
+    }
+}
+
 Test-Case 'a session can be picked up by another process' {
     $session = Start-PtyApp -CommandLine 'cmd.exe' -WorkingDirectory $PSScriptRoot -Name 'pty-test' -Columns 80 -Rows 24
     try {

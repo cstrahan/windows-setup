@@ -94,7 +94,7 @@ try {
                     $response = @{ ok = $true }
                     switch ($request.op) {
                         'screen' {
-                            $response['lines'] = @($terminal.GetScreen())
+                            $response['lines'] = @($terminal.GetScreen([bool] $request.scrollback))
                         }
                         'send' {
                             if ($request.bytes) {

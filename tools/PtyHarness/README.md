@@ -82,20 +82,31 @@ Two things that cost time, in case they come up again:
   refreshes the copy when Terminal's version changes. `$env:PTYHARNESS_CONSOLE_HOST` overrides,
   and `Start-PtyProcess -ConsoleHost Inbox` uses `CreatePseudoConsole` instead.
 
+## The screen, and what has scrolled off
+
+`Get-PtyScreen` returns the visible rows; `-Scrollback` returns everything the terminal still
+holds, oldest first. The split isn't free: libghostty's formatter always emits history and
+viewport together and doesn't pad blank rows, so the viewport can't be had by taking the last N
+lines. What works is asking the terminal how many rows have scrolled off
+(`GhosttyTerminalData.SCROLLBACK_ROWS`) and skipping that many — which reports 0 while an
+application is on the alternate screen, so a full-screen program comes back whole.
+
 ## Known gaps
 
-- **`Get-PtyScreen` returns the scrollback as well as the viewport**: 20 lines of output in a
-  10-row terminal comes back as 20 lines, oldest first. libghostty's formatter formats the whole
-  screen, and blank rows are not padded, so the viewport can't be recovered by taking the last N
-  lines. The fix is to pass the formatter a selection covering the viewport, built from
-  `GHOSTTY_POINT_TAG_VIEWPORT` points through `ghostty_terminal_grid_ref`; the struct layouts come
-  from `ghostty_type_json()`.
 - **Terminal queries go unanswered.** An application that asks the terminal something gets no
-  reply — Neovim's `XTGETTCAP` request ended up drawn on the screen as text. Replies come from
-  `GHOSTTY_TERMINAL_OPT_WRITE_PTY`, which takes a **function pointer**, and the wasm module has no
-  imports, so a host function cannot simply be handed to it. It is still possible: the module
-  exports `__indirect_function_table`, and wasmtime can put a host function in a table slot, whose
-  index is then the function pointer. Worth doing before this harness is trusted for real work.
+  reply: Neovim's `XTGETTCAP` request ends up drawn on the screen as text. Replies come from
+  `GHOSTTY_TERMINAL_OPT_WRITE_PTY`, which takes a function pointer — in WebAssembly, an index into
+  the module's function table. That much works: wasmtime will put a host function in
+  `__indirect_function_table`, `ghostty_terminal_set` accepts the index, and everything reports
+  success. **Calling it crashes the process**: the moment libghostty invokes the callback, the
+  host dies with no exception and no trap. Reproduced in PowerShell and again in a plain C#
+  program, with memory reached through `Caller.TryGetMemorySpan` (the re-entrancy-safe way), so it
+  is neither the PowerShell binding nor unsafe memory access. There is no polling alternative:
+  `GhosttyTerminalData` has no pending-write key.
+
+  Worth trying next: the same table call from another wasmtime binding or the CLI, to find out
+  whether host functions in a freestanding module's table are supported at all here; failing that,
+  a native libghostty-vt build (which needs the zig toolchain, and would drop the wasm route).
 - Colours and styles are discarded: the screen comes back as text.
 
 ## Pieces

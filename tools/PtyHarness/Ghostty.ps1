@@ -104,8 +104,27 @@ function New-GhosttyTerminal {
         [void] $this.Call('ghostty_wasm_free', @($pointer, $Bytes.Length))
     }
 
-    # The active screen as lines of text, as the app has drawn it.
+    # A number from the terminal: GhosttyTerminalData keys, e.g. 2 = ROWS, 15 = SCROLLBACK_ROWS.
+    Add-Member -InputObject $terminal -MemberType ScriptMethod -Name GetNumber -Value {
+        param([int] $Key)
+        $out = $this.Call('ghostty_wasm_alloc', @(8))
+        try {
+            foreach ($offset in 0..7) { $this.Memory.WriteByte($out + $offset, 0) }
+            $this.Check($this.Call('ghostty_terminal_get', @($this.Handle, $Key, $out)), "ghostty_terminal_get($Key)")
+            return $this.Memory.ReadInt32($out)
+        } finally {
+            [void] $this.Call('ghostty_wasm_free', @($out, 8))
+        }
+    }
+
+    # The screen as lines of text, as the app has drawn it: the visible rows by default, or
+    # everything the terminal still holds with -Scrollback.
+    #
+    # The formatter always emits history and viewport together, oldest first, and does not pad
+    # blank rows - so the viewport can't be had by taking the last N lines. It is whatever follows
+    # the rows that have scrolled off, which the terminal will say (SCROLLBACK_ROWS).
     Add-Member -InputObject $terminal -MemberType ScriptMethod -Name GetScreen -Value {
+        param([switch] $Scrollback)
         $outPointer = $this.Call('ghostty_wasm_alloc', @(4))
         $outLength = $this.Call('ghostty_wasm_alloc', @(4))
         try {
@@ -115,7 +134,12 @@ function New-GhosttyTerminal {
             if ($length -eq 0) { return @() }
             $text = $this.Memory.ReadString($pointer, $length, [Text.Encoding]::UTF8)
             [void] $this.Call('ghostty_free', @(0, $pointer, $length))
-            return @($text -split "`r?`n")
+            $lines = @($text -split "`r?`n")
+            if ($Scrollback) { return $lines }
+            $scrolledOff = $this.GetNumber(15)   # SCROLLBACK_ROWS
+            if ($scrolledOff -le 0) { return $lines }
+            if ($scrolledOff -ge $lines.Count) { return @() }
+            return @($lines | Select-Object -Skip $scrolledOff)
         } finally {
             [void] $this.Call('ghostty_wasm_free', @($outPointer, 4))
             [void] $this.Call('ghostty_wasm_free', @($outLength, 4))

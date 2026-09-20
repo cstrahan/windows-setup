@@ -18,8 +18,9 @@
 #   ControlState dwControlKeyState (the Ctrl/Alt/Shift flags)
 #   KeyDown      $true for the press, $false for the release
 #
-# This file has no side effects, so it can be dot-sourced and tested on its own
-# (Test-ConsoleHarness.ps1 does exactly that).
+# Nothing here talks to a console: it turns text into events, and the harness that imports it
+# decides how to deliver them (console input records, or a pty's byte stream). That keeps this
+# module testable on its own, and shareable between harnesses.
 
 # Console dwControlKeyState flags. Left-hand modifiers, which is what a real keyboard sends for
 # the chords people actually type.
@@ -424,3 +425,5 @@ function ConvertFrom-KeySpec {
     # single event still arrives as a one-element array.
     return , $events
 }
+
+Export-ModuleMember -Function ConvertFrom-KeySpec

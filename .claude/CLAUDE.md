@@ -353,7 +353,7 @@ try {
 } finally { Stop-ConsoleApp $session }             # always
 ```
 
-- **Keys use AutoHotkey v2's `Send` syntax** (`tools\ConsoleHarness\KeySpec.ps1`, parsed in the
+- **Keys use AutoHotkey v2's `Send` syntax** (the `tools\KeySpec` module, parsed in the
   calling process): text is literal, `{Enter}` `{Tab}` `{BS 3}` `{F5}` are keys, `^` `!` `+` are
   Ctrl/Alt/Shift for the next key, `{Ctrl down}`…`{Ctrl up}` holds one, and `{^}` `{!}` `{{}`
   `{U+263A}` `{Raw}` are the escapes. **`!` and `+` inside text need escaping**: `:qa!{Enter}`
@@ -380,9 +380,14 @@ try {
   so don't spend time on it. An app on the **alternate screen buffer** (any full-screen TUI)
   refuses buffer/window resizes with `ERROR_INVALID_HANDLE`, so `Set-ConsoleSize` falls back to
   resizing conhost's window; it also has no scrollback.
-- **Tests:** `pwsh -File tools\ConsoleHarness\Test-ConsoleHarness.ps1` (add `-SkipConsole` for the
-  parser cases alone; the rest drive a real fzf, so fzf must be on PATH — it isn't in Claude's
-  shells, so prepend `$env:LOCALAPPDATA\mise\shims`).
+- **Tests:** `pwsh -File tools\Test-Tools.ps1` runs every `tools\<module>\Test-*.ps1`
+  (`-Name KeySpec` for one, `-SkipConsole` to skip the ones that drive a real console). The
+  console tests need fzf on PATH — it isn't in Claude's shells, so prepend
+  `$env:LOCALAPPDATA\mise\shims`. Shared assertions live in `tools\TestSupport.ps1`; there's no
+  Pester because Windows ships only 3.4 and these tools must work on an unconfigured machine.
+- **The key/mouse parser is its own module** (`tools\KeySpec`, PowerShell 5.1-compatible, no
+  console dependencies) so the planned ConPTY harness can share the syntax. Its tests are
+  `tools\KeySpec\Test-KeySpec.ps1`, and its README documents the syntax in full.
 
 - **How:** the app runs in its own hidden console; each call spawns a worker that attaches to it
   (`AttachConsole`), reads the visible grid (`ReadConsoleOutputCharacter`) and injects keys
@@ -505,6 +510,28 @@ The earlier `nvim-data` (only shada/swap from Neovim 0.10) is at `nvim-data.bak`
 - **Not re-checked since KB5066791:** WSL/WSLg on this machine. Routine runs still use `-SkipWsl`.
 - **Left for the user to delete:** `C:\Ruby32-x64\msys64` (865 MB), orphaned by the Ruby 3.2
   uninstall.
+- **A ConPTY harness is planned**, to lift the limits of the attach-based one (fzf's mouse, real
+  reflow, true scrollback). Design agreed 2026-09-19, step 1 (the shared `tools\KeySpec` module)
+  done. Remaining: a workload that fetches the pinned wasm and restores Wasmtime; the pty host;
+  the client cmdlets. **Spike results, all verified on this machine:**
+  - `ghostty-vt.wasm` / `ghostty-vt-small.wasm` (1.0 MB / 747 KB) are published **only on the
+    rolling `tip` prerelease** of ghostty-org/ghostty (rebuilt per commit; tagged releases carry
+    no wasm), so pin by SHA-256 as the driver packages do. The C API is explicitly unstable.
+  - The module has **zero imports** — no WASI, no JS glue — so any runtime can instantiate it. It
+    needs `simd128`, which wasmtime enables by default.
+  - `Wasmtime` 48.0.2 from NuGet (net8.0 + netstandard2.0, bundled native binaries) loaded it and
+    ran `ghostty_terminal_new` → `ghostty_terminal_vt_write` → `ghostty_formatter_format_alloc`,
+    returning correctly emulated screen text (cursor addressing, erase-line, SGR). Calls are flat
+    `i32` signatures; structs are passed as pointers into wasm memory.
+  - **`ghostty_type_json()`** returns a 43 KB description of every struct's size, alignment and
+    field offsets — use it to lay structs out rather than guessing (`GhosttyFormatterTerminalOptions`
+    is 40 bytes, not the 20 a naive reading of the header suggests).
+  - `ghostty_key_encoder_encode` / `ghostty_mouse_encoder_encode` also *produce* input bytes, so
+    the pty side can hand KeySpec events to ghostty instead of hand-rolling SGR.
+  - **ConPTY owns its byte stream**, unlike conhost: a session will need a resident host process
+    (pty + emulator + named pipe) rather than the stateless worker used today.
+  - Zig isn't needed for this (the prebuilt wasm works), but a zig/WASM workload would let us
+    build libghostty-vt from a tagged source tarball instead of a nightly asset.
 - **`tools\ConsoleHarness` now makes TUI behaviour testable** (fzf, Neovim), so verify interactive
   changes yourself instead of asking the user to try them.
 

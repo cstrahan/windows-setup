@@ -13,9 +13,10 @@ $script:WorkerPath = Join-Path $PSScriptRoot 'ConsoleWorker.ps1'
 # Sessions outlive the process that started them, so each one is recorded here and can be picked
 # up again with Get-ConsoleApp. Screens live in the same place.
 $script:SessionDirectory = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'console-harness')
-# Key specifications are parsed here rather than in the worker, so a bad specification fails
-# immediately with a useful message instead of as a worker exit code.
-. (Join-Path $PSScriptRoot 'KeySpec.ps1')
+# Key specifications are parsed in this process rather than in the worker, so a bad specification
+# fails immediately with a useful message instead of as a worker exit code. The parser is its own
+# module because it says nothing about consoles: a pty-based harness wants the same syntax.
+Import-Module (Join-Path $PSScriptRoot '..' 'KeySpec' 'KeySpec.psd1') -ErrorAction Stop
 
 function Start-ConsoleApp {
     <#

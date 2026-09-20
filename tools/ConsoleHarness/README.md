@@ -19,28 +19,9 @@ try {
 
 ## Key syntax
 
-`Send-ConsoleKeys` uses [AutoHotkey v2's `Send`
-syntax](https://www.autohotkey.com/docs/v2/lib/Send.htm), so text is just text and keys are named
-in braces:
-
-| Written | Sends |
-|---|---|
-| `find me` | those characters, including spaces and commas |
-| `{Enter}` | the Enter key. Also `{Tab}` `{Esc}` `{Space}` `{BS}` `{Del}` `{Ins}` `{Up}` `{Down}` `{Left}` `{Right}` `{Home}` `{End}` `{PgUp}` `{PgDn}` `{F1}`–`{F24}` |
-| `^s` `!x` `+a` | Ctrl+S, Alt+X, Shift+A — the prefix applies to the next key only |
-| `^{Enter}` | Ctrl+Enter |
-| `{BS 3}` `{a 5}` | a repeat count |
-| `{Ctrl down}jk{Ctrl up}` | holds a modifier across several keys |
-| `{^}` `{!}` `{+}` `{#}` `{{}` `{}}` | those characters, typed |
-| `{U+263A}` | a character by code point |
-| `{Raw}…` | the rest of the string literally |
-| `{Click 40 10}` | click at column 40, row 10 of the visible window |
-| `{Click 40 10 Right}` `{Click 3}` `{Click 40 10 0}` | another button, a repeat count, or move without clicking |
-| `{LButton down}` … `{LButton up}` | drag. Also `{RButton}` `{MButton}` `{XButton1}` `{XButton2}` |
-| `{WheelDown 3}` `{WheelUp}` `{WheelLeft}` `{WheelRight}` | the wheel, one event per notch |
-
-Mouse coordinates stick: a token without them uses the last position, and with none given at all,
-the middle of the window. See below for which apps can receive them.
+Keys are written in [AutoHotkey v2's `Send` syntax](https://www.autohotkey.com/docs/v2/lib/Send.htm)
+— `'find{Enter}'`, `'^s'`, `'{BS 3}'`, `'{Click 40 10}'`, `'{WheelDown 3}'` — which the
+[KeySpec module](../KeySpec/README.md) parses and documents in full.
 
 Words like `enter` and `tab` are text, so `Send-ConsoleKeys $session 'enter'` types five
 characters. For a string where *nothing* should be syntax — a path, a variable, something the app
@@ -51,65 +32,9 @@ Send-ConsoleText $session 'C:\src\a,b{x}^y'
 ```
 
 Several arguments are sent one after another with nothing in between, so
-`Send-ConsoleKeys $s 'a', 'b'` and `Send-ConsoleKeys $s 'ab'` are the same thing.
-
-Differences from AutoHotkey, all because the target is a console app rather than a window:
-
-- `#` (Win) and the mouse, media and `{Blind}` features are rejected with an error: nothing
-  reaches a console app through them.
-- `{Ctrl}` on its own is an error. A console app sees modifiers only as flags on another key, so
-  use `^x` or `{Ctrl down}`…`{Ctrl up}`.
-- `{Raw}` and `{Text}` mean the same thing here, and so does `Send-ConsoleText` (AHK's `{Text}`
-  and `SendText` only pick a different injection method). A newline in literal text is still
-  Enter and a tab is still Tab, as they would be if the text were typed.
-
-## Size, and the scrollback behind the window
-
-```powershell
-$info = Get-ConsoleInfo $session          # size, cursor, input mode, and WindowTop
-Set-ConsoleSize $session -Width 80 -Height 25    # the app sees a resize event and reflows
-
-Get-ConsoleScreen $session -Scrollback           # the whole buffer, oldest row first
-Get-ConsoleScreen $session -FromRow 120 -Rows 10
-Move-ConsoleView $session -Lines -20             # scroll back, as dragging the scrollbar would
-Move-ConsoleView $session -Start                 # or -End, or -Top <row>
-```
-
-`WindowTop` is where the visible window sits in the buffer: the scroll position. Rows above it are
-what has scrolled off. `Start-ConsoleApp -BufferHeight` sets how much of that is kept (1000 rows by
-default); a full-screen app on the alternate screen buffer has none, by definition.
-
-Resizing takes one of two routes, and `Set-ConsoleSize` picks for itself. Normally it resizes the
-buffer and window directly. While an app holds the **alternate screen buffer** (Neovim, fzf),
-conhost answers every `SetConsoleScreenBufferSize` and `SetConsoleWindowInfo` with
-`ERROR_INVALID_HANDLE`, so it resizes conhost's own window instead, which still reflows and still
-tells the app. That path converges over a few attempts rather than computing once: shrinking a
-console can take its scrollbar away, which changes the window chrome mid-resize and otherwise
-lands a few columns short.
-
-## Sessions outlive the process that started them
-
-The app runs in its own console, so it keeps running after the PowerShell process that started it
-exits. Give it a name and pick it up later — from another script, another shell, or a later step
-of the same job:
-
-```powershell
-Start-ConsoleApp -Command 'nvim README.md' -Name editor    # one process
-
-$session = Get-ConsoleApp -Name editor                     # another process, later
-Send-ConsoleKeys $session ':w{Enter}'
-Stop-ConsoleApp $session
-```
-
-`Get-ConsoleApp` with no arguments lists everything still running, and prunes the records of
-sessions that have ended. Records live in `%TEMP%\console-harness`, alongside the screens; a
-recorded id that has been reused by an unrelated process is spotted by its start time and
-discarded. `Stop-ConsoleApp -All` stops the lot, which is the way out of a script that failed
-before its `finally`.
-
-`Stop-ConsoleApp` kills the whole process tree. The app is a child of the PowerShell wrapper (and
-a grandchild, when a mise shim is involved), so stopping only the wrapper would leave it running
-in a console nothing is attached to.
+`Send-ConsoleKeys $s 'a', 'b'` and `Send-ConsoleKeys $s 'ab'` are the same thing. Mouse
+coordinates are character cells of the visible window, matching the row indices
+`Get-ConsoleScreen` returns; which apps can actually receive them is the next section.
 
 ## Mouse: two delivery paths, and which apps take which
 
@@ -160,16 +85,24 @@ conhost has already turned the app's escape sequences into that grid, so there's
 emulation here, and input doesn't depend on which window has focus. The worker is a separate
 process because a process can only be attached to one console at a time.
 
-Key specifications are parsed by `KeySpec.ps1` in the calling process, so a typo is an immediate
-error rather than a worker exit code, and the worker only turns events into `INPUT_RECORD`s. The
+Key specifications are parsed by the [KeySpec module](../KeySpec/README.md) in the calling
+process, so a typo is an immediate error rather than a worker exit code, and the worker only turns
+events into `INPUT_RECORD`s. The
 events travel in a temp file: a command line would need a delimiter, and any delimiter would be a
 character that then couldn't be typed.
 
 ## Tests
 
 ```powershell
-pwsh -File .\tools\ConsoleHarness\Test-ConsoleHarness.ps1                 # parser + a real fzf
-pwsh -File .\tools\ConsoleHarness\Test-ConsoleHarness.ps1 -SkipConsole    # parser only
+pwsh -File .\tools\Test-Tools.ps1                            # every tool's tests
+pwsh -File .\tools\ConsoleHarness\Test-ConsoleHarness.ps1   # these drive a real fzf
+```
+
+`InputSink.ps1` is a fixture: a console app that logs every input record it reads, so the
+tests can assert what actually arrived rather than how some other app reacted to it.
+
+```powershell
+pwsh -File .\tools\Test-Tools.ps1 -Name KeySpec              # just one module
 ```
 
 ## Limits

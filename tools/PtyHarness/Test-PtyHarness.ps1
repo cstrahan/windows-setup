@@ -79,6 +79,18 @@ Test-Case 'the screen is the viewport, and -Scrollback is everything' {
     }
 }
 
+Test-Case 'the terminal answers what a program asks it' {
+    # Without this, a program that queries the terminal waits for a reply that never comes, and
+    # the query itself can end up drawn on the screen (Neovim's XTGETTCAP did).
+    $probe = Join-Path $PSScriptRoot 'QueryProbe.ps1'
+    Use-Pty "pwsh -NoProfile -File `"$probe`"" 80 24 'ANSWER:' {
+        param($session)
+        $line = Get-PtyScreen $session -NonEmpty | Where-Object { $_ -match 'ANSWER:' } | Select-Object -First 1
+        # A primary device attributes reply: ESC [ ? ... c
+        Assert-Equal $true ($line -match 'ANSWER:<ESC>\[\?[0-9;]+c:END') "the program was told: '$line'"
+    }
+}
+
 Test-Case 'a session can be picked up by another process' {
     $session = Start-PtyApp -CommandLine 'cmd.exe' -WorkingDirectory $PSScriptRoot -Name 'pty-test' -Columns 80 -Rows 24
     try {
@@ -114,31 +126,49 @@ if (-not (Get-Command fzf -ErrorAction SilentlyContinue)) {
 # This only works with Windows Terminal's OpenConsole; the inbox host forwards no mouse at all.
 $items = "1..40 | ForEach-Object { 'item ' + `$_ }"
 
+# The preview is drawn in pieces, so match a complete SEL="item N" rather than the bare label:
+# 'SEL=' can be on screen a frame before its value is.
 function Get-Selection($Session) {
-    $line = Get-PtyScreen $Session | Where-Object { $_ -match 'SEL=' } | Select-Object -First 1
-    if ($line -match 'SEL="(.+?)"') { return $Matches[1] }
+    $line = Get-PtyScreen $Session | Where-Object { $_ -match 'SEL="item \d+"' } | Select-Object -First 1
+    if ($line -match 'SEL="(item \d+)"') { return $Matches[1] }
     return ''
 }
 
+# Waits for a fully drawn selection that differs from $Previous, and returns it. Waiting for a
+# change rather than for the value the test expects keeps the assertion meaningful: if the
+# application lands somewhere else, the test says so instead of polling until it agrees.
+function Wait-Selection($Session, [string] $Previous = '', [int] $TimeoutSeconds = 10) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $selection = Get-Selection $Session
+        if ($selection -and $selection -ne $Previous) { return $selection }
+        Start-Sleep -Milliseconds 150
+    } while ((Get-Date) -lt $deadline)
+    throw "the selection stayed at '$Previous' for ${TimeoutSeconds}s"
+}
+
 Test-Case 'full-screen fzf takes the wheel and a click' {
-    Use-Pty "pwsh -NoProfile -Command `"$items | fzf --preview 'echo SEL={}'`"" 100 24 'SEL=' {
+    Use-Pty "pwsh -NoProfile -Command `"$items | fzf --preview 'echo SEL={}'`"" 100 24 'SEL="item' {
         param($session)
-        Assert-Equal 'item 1' (Get-Selection $session)
-        Send-PtyKeys $session '{WheelUp 5 10 5}' -SettleMilliseconds 900 | Out-Null
-        Assert-Equal 'item 6' (Get-Selection $session) 'five notches up the list'
-        Send-PtyKeys $session '{Click 4 8}' -SettleMilliseconds 900 | Out-Null
-        Assert-Equal 'item 14' (Get-Selection $session) 'clicking the row at index 8'
+        $selected = Wait-Selection $session
+        Assert-Equal 'item 1' $selected
+        Send-PtyKeys $session '{WheelUp 5 10 5}' -SettleMilliseconds 200 | Out-Null
+        $selected = Wait-Selection $session $selected
+        Assert-Equal 'item 6' $selected 'five notches up the list'
+        Send-PtyKeys $session '{Click 4 8}' -SettleMilliseconds 200 | Out-Null
+        Assert-Equal 'item 14' (Wait-Selection $session $selected) 'clicking the row at index 8'
     }
 }
 
 Test-Case 'fzf --height takes the same events, by a different route' {
     # Aim inside the box: with --height the application draws in part of the screen, and events
     # outside it are ignored (which looks exactly like mouse being broken).
-    Use-Pty "pwsh -NoProfile -Command `"$items | fzf --height 60% --preview 'echo SEL={}'`"" 100 30 'SEL=' {
+    Use-Pty "pwsh -NoProfile -Command `"$items | fzf --height 60% --preview 'echo SEL={}'`"" 100 30 'SEL="item' {
         param($session)
-        Assert-Equal 'item 1' (Get-Selection $session)
-        Send-PtyKeys $session '{WheelUp 5 10 4}' -SettleMilliseconds 900 | Out-Null
-        Assert-Equal 'item 5' (Get-Selection $session)
+        $selected = Wait-Selection $session
+        Assert-Equal 'item 1' $selected
+        Send-PtyKeys $session '{WheelUp 5 10 4}' -SettleMilliseconds 200 | Out-Null
+        Assert-Equal 'item 5' (Wait-Selection $session $selected)
     }
 }
 

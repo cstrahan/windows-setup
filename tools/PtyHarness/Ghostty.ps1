@@ -35,6 +35,11 @@ function Initialize-Wasmtime {
     # resolves by name.
     [void] [Runtime.InteropServices.NativeLibrary]::Load($native)
     Add-Type -Path $managed
+    # The reply callback is compiled against wasmtime; GhosttyReplySink.cs says why it can't be a
+    # PowerShell scriptblock. -IgnoreWarnings: the binding targets net8.0 and this runtime is
+    # newer, which is only a warning.
+    Add-Type -Path (Join-Path $PSScriptRoot 'GhosttyReplySink.cs') -ReferencedAssemblies $managed `
+        -IgnoreWarnings -WarningAction SilentlyContinue
 }
 
 function New-GhosttyTerminal {
@@ -69,6 +74,8 @@ function New-GhosttyTerminal {
         Formatter  = 0
         Columns    = $Columns
         Rows       = $Rows
+        # Answers the terminal wants sent back to the program; the host drains these.
+        Replies    = $null
     }
 
     Add-Member -InputObject $terminal -MemberType ScriptMethod -Name Call -Value {
@@ -102,6 +109,12 @@ function New-GhosttyTerminal {
         [Runtime.InteropServices.Marshal]::Copy($Bytes, 0, [IntPtr]::Add($this.Memory.GetPointer(), $pointer), $Bytes.Length)
         [void] $this.Call('ghostty_terminal_vt_write', @($this.Handle, $pointer, $Bytes.Length))
         [void] $this.Call('ghostty_wasm_free', @($pointer, $Bytes.Length))
+    }
+
+    # Whatever the terminal answered since the last write, as bytes for the program's input.
+    Add-Member -InputObject $terminal -MemberType ScriptMethod -Name TakeReplies -Value {
+        if (-not $this.Replies) { return [byte[]]::new(0) }
+        return $this.Replies.Take()
     }
 
     # A number from the terminal: GhosttyTerminalData keys, e.g. 2 = ROWS, 15 = SCROLLBACK_ROWS.
@@ -178,6 +191,24 @@ function New-GhosttyTerminal {
     $terminal.Formatter = $terminal.Call('ghostty_wasm_take_opaque', @($slot))
     [void] $terminal.Call('ghostty_wasm_free', @($options, $optionsSize))
     [void] $terminal.Call('ghostty_wasm_free_opaque', @($slot))
+
+    # Answer the questions applications ask the terminal. The callback is a host function placed
+    # in the module's function table, and its index is the function pointer.
+    $table = $instance.GetTable('__indirect_function_table')
+    if ($table) {
+        $sink = [PtyHarness.GhosttyReplySink]::new()
+        $callback = $sink.CreateFunction($store)
+        # Grow returns the old size, which is where our function landed.
+        $index = [int] $table.Grow(1, $callback)
+        # The value IS the function pointer, not a pointer to it: ghostty_terminal_set takes
+        # `?*const anyopaque` and stores it as the callback (see terminal.zig, setTyped). Passing
+        # a pointer to a cell holding the index makes libghostty call a wild table entry, which
+        # kills the process without a trap or an exception.
+        $terminal.Check($terminal.Call('ghostty_terminal_set', @($terminal.Handle, 1, $index)), 'ghostty_terminal_set(WRITE_PTY)')
+        $terminal.Replies = $sink
+        # Keep the Function alive: collected, its table entry points at nothing.
+        Add-Member -InputObject $terminal -NotePropertyName WritePtyCallback -NotePropertyValue $callback
+    }
 
     return $terminal
 }

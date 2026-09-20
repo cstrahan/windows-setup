@@ -91,22 +91,32 @@ lines. What works is asking the terminal how many rows have scrolled off
 (`GhosttyTerminalData.SCROLLBACK_ROWS`) and skipping that many — which reports 0 while an
 application is on the alternate screen, so a full-screen program comes back whole.
 
+## Answering what a program asks
+
+Applications question the terminal — primary device attributes, XTVERSION, size and mode reports —
+and expect answers on their input. The harness provides them: libghostty hands each reply to a
+callback, the host queues it and writes it back to the pty after the write that produced it. Left
+unanswered, a program can wait for a reply that never comes, and the query itself can end up drawn
+on the screen (Neovim's `XTGETTCAP` did exactly that).
+
+The callback is a host function in the module's own function table, since the wasm has no imports
+to hang one on: wasmtime grows `__indirect_function_table` by one, and that index is the function
+pointer. Two things about it are worth knowing, because both fail in the same unhelpful way:
+
+- **The value passed to `ghostty_terminal_set` *is* the function pointer**, not a pointer to it.
+  The header says "Pointer to the value to set", which is true of the other options but not of the
+  callbacks: `setTyped` in ghostty's `terminal.zig` stores the argument itself. Passing a pointer
+  to a cell holding the index makes libghostty call a wild table entry.
+- **The callback's signature must match exactly** — `(i32, i32, i32, i32) -> ()` for
+  `GhosttyTerminalWritePtyFn`, and the delegate must take `Caller` so it can reach memory without
+  re-entering the store.
+
+Get either wrong and **the process dies silently**: no exception, no wasmtime trap, no output.
+That is worth knowing in itself, and it is not ghostty's doing — a four-line `.wat` module with a
+deliberately mismatched `call_indirect` kills the process the same way.
+
 ## Known gaps
 
-- **Terminal queries go unanswered.** An application that asks the terminal something gets no
-  reply: Neovim's `XTGETTCAP` request ends up drawn on the screen as text. Replies come from
-  `GHOSTTY_TERMINAL_OPT_WRITE_PTY`, which takes a function pointer — in WebAssembly, an index into
-  the module's function table. That much works: wasmtime will put a host function in
-  `__indirect_function_table`, `ghostty_terminal_set` accepts the index, and everything reports
-  success. **Calling it crashes the process**: the moment libghostty invokes the callback, the
-  host dies with no exception and no trap. Reproduced in PowerShell and again in a plain C#
-  program, with memory reached through `Caller.TryGetMemorySpan` (the re-entrancy-safe way), so it
-  is neither the PowerShell binding nor unsafe memory access. There is no polling alternative:
-  `GhosttyTerminalData` has no pending-write key.
-
-  Worth trying next: the same table call from another wasmtime binding or the CLI, to find out
-  whether host functions in a freestanding module's table are supported at all here; failing that,
-  a native libghostty-vt build (which needs the zig toolchain, and would drop the wasm route).
 - Colours and styles are discarded: the screen comes back as text.
 
 ## Pieces
@@ -119,6 +129,8 @@ application is on the alternate screen, so a full-screen program comes back whol
 | `PtyNative.cs` | ConPTY through `CreatePseudoConsole` (the inbox host) |
 | `PtyNativeOpenConsole.cs` | a pty hosted by Windows Terminal's OpenConsole, winconpty's way |
 | `Ghostty.ps1` | libghostty-vt in wasmtime: write bytes, read the screen, resize |
+| `GhosttyReplySink.cs` | the callback that collects the terminal's answers to a program's queries |
+| `QueryProbe.ps1` | a fixture that asks the terminal a question and prints the answer |
 | `vendor/` | the emulator itself, and where it came from |
 | `lib/` | wasmtime, fetched by the `pty-harness` workload (gitignored) |
 

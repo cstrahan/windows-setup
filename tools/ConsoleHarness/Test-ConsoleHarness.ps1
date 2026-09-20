@@ -260,18 +260,34 @@ Import-Module '$(Join-Path $PSScriptRoot 'ConsoleHarness.psd1')'
         } finally { Stop-ConsoleApp $session }
     }
 
+    # Match a complete SEL="item N": the preview is drawn in pieces, so the label can be on
+    # screen a frame before its value is.
     function Get-Selection($Session) {
-        $line = Get-ConsoleScreen $Session | Where-Object { $_ -match 'SEL=' } | Select-Object -First 1
-        if ($line -match 'SEL="(.+?)"') { return $Matches[1] }
+        $line = Get-ConsoleScreen $Session | Where-Object { $_ -match 'SEL="item \d+"' } | Select-Object -First 1
+        if ($line -match 'SEL="(item \d+)"') { return $Matches[1] }
         return ''
+    }
+
+    # Waits for a fully drawn selection that differs from $Previous. Waiting for a change rather
+    # than for the value the test expects keeps the assertion meaningful: if the application lands
+    # somewhere else, the test says so instead of polling until it agrees.
+    function Wait-Selection($Session, [string] $Previous = '', [int] $TimeoutSeconds = 10) {
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        do {
+            $selection = Get-Selection $Session
+            if ($selection -and $selection -ne $Previous) { return $selection }
+            Start-Sleep -Milliseconds 150
+        } while ((Get-Date) -lt $deadline)
+        throw "the selection stayed at '$Previous' for ${TimeoutSeconds}s"
     }
 
     Test-Case 'full-screen fzf takes mouse as console records (tcell)' {
         Use-FzfWithPreview '' {
             param($session)
-            Assert-Equal 'item 1' (Get-Selection $session)
-            Send-ConsoleKeys $session '{WheelUp 5 10 5}' -MouseDelivery Record -SettleMilliseconds 800 | Out-Null
-            Assert-Equal 'item 6' (Get-Selection $session) 'five notches up the list'
+            $selected = Wait-Selection $session
+            Assert-Equal 'item 1' $selected
+            Send-ConsoleKeys $session '{WheelUp 5 10 5}' -MouseDelivery Record -SettleMilliseconds 200 | Out-Null
+            Assert-Equal 'item 6' (Wait-Selection $session $selected) 'five notches up the list'
         }
     }
 
@@ -285,20 +301,23 @@ Import-Module '$(Join-Path $PSScriptRoot 'ConsoleHarness.psd1')'
                 if ($screen[$index] -match 'item 14') { $row = $index; break }
             }
             Assert-Equal $true ($row -ge 0) 'item 14 should be on screen'
-            Send-ConsoleKeys $session "{Click 4 $row}" -MouseDelivery Record -SettleMilliseconds 800 | Out-Null
-            Assert-Equal 'item 14' (Get-Selection $session)
+            $selected = Get-Selection $session
+            Send-ConsoleKeys $session "{Click 4 $row}" -MouseDelivery Record -SettleMilliseconds 200 | Out-Null
+            Assert-Equal 'item 14' (Wait-Selection $session $selected)
         }
     }
 
     Test-Case 'fzf --height takes mouse as SGR instead (light renderer)' {
         Use-FzfWithPreview '--height 60%' {
             param($session)
-            Assert-Equal 'item 1' (Get-Selection $session)
-            # Record delivery is what this renderer ignores; Vt is what it reads.
-            Send-ConsoleKeys $session '{WheelUp 5 10 4}' -MouseDelivery Record -SettleMilliseconds 600 | Out-Null
+            $selected = Wait-Selection $session
+            Assert-Equal 'item 1' $selected
+            # Record delivery is what this renderer ignores; Vt is what it reads. Nothing should
+            # change here, so this one does have to wait out a fixed delay.
+            Send-ConsoleKeys $session '{WheelUp 5 10 4}' -MouseDelivery Record -SettleMilliseconds 800 | Out-Null
             Assert-Equal 'item 1' (Get-Selection $session) 'console records are ignored here'
-            Send-ConsoleKeys $session '{WheelUp 5 10 4}' -SettleMilliseconds 600 | Out-Null
-            Assert-Equal 'item 5' (Get-Selection $session) 'the default (Vt) delivery works'
+            Send-ConsoleKeys $session '{WheelUp 5 10 4}' -SettleMilliseconds 200 | Out-Null
+            Assert-Equal 'item 5' (Wait-Selection $session $selected) 'the default (Vt) delivery works'
         }
     }
 

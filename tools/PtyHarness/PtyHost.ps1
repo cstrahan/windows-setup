@@ -80,6 +80,14 @@ try {
                     $stream.Dispose()
                 }
                 $terminal.Write($chunk)
+                # The terminal answers questions the program asked (device attributes, size and
+                # mode reports); those answers go back in as if they had been typed.
+                $replies = $terminal.TakeReplies()
+                if ($replies.Length) {
+                    Write-Log "answering $($replies.Length) byte(s) of terminal queries"
+                    $pty.Input.Write($replies, 0, $replies.Length)
+                    $pty.Input.Flush()
+                }
                 $readTask = $pty.Output.ReadAsync($buffer, 0, $buffer.Length)
             }
         } elseif ($index -eq 1) {

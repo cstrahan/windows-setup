@@ -222,6 +222,40 @@ if ($SkipConsole) {
         }
     }
 
+    Test-Case 'another process can pick the session up and drive it' {
+        $session = Start-ConsoleApp -Command $command -WorkingDirectory $PSScriptRoot -Name 'harness-test'
+        try {
+            Wait-ConsoleText $session '^\s*>' | Out-Null
+            Send-ConsoleKeys $session 'al' -SettleMilliseconds 400 | Out-Null
+            # A separate process: it has only the name, and finds the running app from that.
+            $script = @"
+Import-Module '$(Join-Path $PSScriptRoot 'ConsoleHarness.psd1')'
+`$s = Get-ConsoleApp -Name 'harness-test'
+(Send-ConsoleKeys `$s 'pha' -SettleMilliseconds 400) -match '^\s*>' -replace '^\s*>\s?'
+"@
+            $seen = (& pwsh -NoProfile -NoLogo -Command $script | Select-Object -Last 1).TrimEnd()
+            Assert-Equal 'alpha' $seen 'the other process should have typed onto the same query'
+        } finally { Stop-ConsoleApp $session }
+    }
+
+    Test-Case 'stopping a session kills the app, not just its wrapper' {
+        $session = Start-ConsoleApp -Command $command -WorkingDirectory $PSScriptRoot
+        Wait-ConsoleText $session '^\s*>' | Out-Null
+        $descendants = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($session.Id)")
+        Assert-Equal $true ($descendants.Count -gt 0) 'the wrapper should have a child'
+        Stop-ConsoleApp $session
+        $survivors = @($descendants | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
+        Assert-Equal 0 $survivors.Count 'no child should be left running'
+    }
+
+    Test-Case 'a stopped session is forgotten' {
+        $session = Start-ConsoleApp -Command $command -WorkingDirectory $PSScriptRoot -Name 'harness-test'
+        Wait-ConsoleText $session '^\s*>' | Out-Null
+        Stop-ConsoleApp $session
+        Assert-Throws { Get-ConsoleApp -Name 'harness-test' } "no console app named 'harness-test'"
+        Assert-Equal $false (Test-Path -LiteralPath $session.RecordPath) 'the record should be gone'
+    }
+
     Test-Case 'Send-ConsoleText does not press keys' {
         Use-Fzf {
             param($session)

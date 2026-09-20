@@ -362,6 +362,13 @@ try {
   like `enter` all survive — use it for anything that came from a variable or the app's own
   output. `#` (Win), mouse/media keys and a bare `{Ctrl}` are errors, since a console app can't
   receive them.
+- **A session survives your tool call**, so poking at an app across several calls works: start it
+  with `-Name <label>`, then `$s = Get-ConsoleApp -Name <label>` in the next call and carry on
+  sending keys. `Get-ConsoleApp` with no arguments lists what's still running (records and screens
+  live in `%TEMP%\console-harness`). **`Stop-ConsoleApp` kills the process tree**, not just the
+  `pwsh` wrapper — before that was fixed, tests left 180 stray `fzf`/mise-shim processes behind.
+  `Stop-ConsoleApp -All` clears everything the module started, which is the cleanup to run after
+  a script died before its `finally`.
 - **Tests:** `pwsh -File tools\ConsoleHarness\Test-ConsoleHarness.ps1` (add `-SkipConsole` for the
   parser cases alone; the rest drive a real fzf, so fzf must be on PATH — it isn't in Claude's
   shells, so prepend `$env:LOCALAPPDATA\mise\shims`).

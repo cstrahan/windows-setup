@@ -10,6 +10,9 @@
 # Not for GUI apps, and not a terminal emulator: it sees the final rendering, not the byte stream.
 
 $script:WorkerPath = Join-Path $PSScriptRoot 'ConsoleWorker.ps1'
+# Sessions outlive the process that started them, so each one is recorded here and can be picked
+# up again with Get-ConsoleApp. Screens live in the same place.
+$script:SessionDirectory = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'console-harness')
 # Key specifications are parsed here rather than in the worker, so a bad specification fails
 # immediately with a useful message instead of as a worker exit code.
 . (Join-Path $PSScriptRoot 'KeySpec.ps1')
@@ -21,6 +24,10 @@ function Start-ConsoleApp {
 
     .EXAMPLE
     $session = Start-ConsoleApp -Command 'fzf' -WorkingDirectory C:\repo
+
+    .EXAMPLE
+    # The app keeps running after this process exits; -Name makes it easy to find again.
+    Start-ConsoleApp -Command 'nvim README.md' -Name editor
     #>
     [CmdletBinding()]
     param(
@@ -30,21 +37,108 @@ function Start-ConsoleApp {
         [int] $Width = 120,
         [int] $Height = 30,
         # Written to this file by the command, for whatever it produces on stdout.
-        [string] $OutputPath
+        [string] $OutputPath,
+        # A label to find this session by later: Get-ConsoleApp -Name <name>.
+        [string] $Name
     )
 
+    # Get-ConsoleApp throws when a name doesn't match, which here just means the name is free.
+    $existing = try { Get-ConsoleApp -Name $Name } catch { $null }
+    if ($Name -and $existing) {
+        throw "a console app named '$Name' is already running (pid $($existing.Id)). Stop it first, or pick another name."
+    }
     $prologue = "mode con: cols=$Width lines=$Height | Out-Null; Set-Location -LiteralPath '$($WorkingDirectory -replace "'", "''")'"
     $body = if ($OutputPath) { "$Command | Out-File -LiteralPath '$($OutputPath -replace "'", "''")'" } else { $Command }
     $process = Start-Process pwsh -PassThru -WindowStyle Hidden -ArgumentList @(
         '-NoProfile', '-NoLogo', '-Command', "$prologue; $body"
     )
-    return [pscustomobject]@{
-        PSTypeName  = 'ConsoleHarness.Session'
-        Process     = $process
-        Id          = $process.Id
-        OutputPath  = $OutputPath
-        ScreenPath  = [IO.Path]::Combine([IO.Path]::GetTempPath(), "console-harness-$($process.Id).txt")
+    $session = New-SessionObject -Process $process -Name $Name -Command $Command -WorkingDirectory $WorkingDirectory -OutputPath $OutputPath
+    Save-Session -Session $session
+    return $session
+}
+
+function Get-ConsoleApp {
+    <#
+    .SYNOPSIS
+    Returns sessions that are still running, including ones started by an earlier process.
+
+    .DESCRIPTION
+    A console app outlives the PowerShell process that started it, so a session can be picked up
+    later: this rebuilds it from the record Start-ConsoleApp wrote. Records whose process has gone
+    (or whose id has been reused by something else) are pruned as they're found.
+
+    .EXAMPLE
+    Get-ConsoleApp                       # everything still running
+
+    .EXAMPLE
+    $session = Get-ConsoleApp -Name editor
+    Send-ConsoleKeys $session ':w{Enter}'
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0)] [string] $Name,
+        [int] $Id
+    )
+
+    if (-not (Test-Path -LiteralPath $script:SessionDirectory)) { $sessions = @() } else {
+        $sessions = foreach ($file in Get-ChildItem -LiteralPath $script:SessionDirectory -Filter '*.json') {
+            $record = try { Get-Content -Raw -LiteralPath $file.FullName | ConvertFrom-Json } catch { $null }
+            if (-not $record) { [IO.File]::Delete($file.FullName); continue }
+            $process = Get-Process -Id $record.Id -ErrorAction SilentlyContinue
+            # Ids get reused, so the start time decides whether this is still the same process.
+            # ConvertFrom-Json hands back a DateTime for an ISO-8601 string, so compare as dates:
+            # comparing against a round-trip string would take every record for a stale one.
+            $recorded = [datetime] $record.StartTime
+            if (-not $process -or $process.StartTime.ToUniversalTime() -ne $recorded.ToUniversalTime()) {
+                [IO.File]::Delete($file.FullName)
+                if (Test-Path -LiteralPath $record.ScreenPath) { [IO.File]::Delete($record.ScreenPath) }
+                continue
+            }
+            New-SessionObject -Process $process -Name $record.Name -Command $record.Command `
+                -WorkingDirectory $record.WorkingDirectory -OutputPath $record.OutputPath
+        }
     }
+
+    $matching = @($sessions | Where-Object {
+        (-not $Name -or $_.Name -eq $Name) -and (-not $Id -or $_.Id -eq $Id)
+    })
+    if (($Name -or $Id) -and -not $matching) {
+        $running = if ($sessions) { ($sessions | ForEach-Object { "$($_.Id)$(if ($_.Name) { " ($($_.Name))" })" }) -join ', ' } else { 'none' }
+        throw "no console app $(if ($Name) { "named '$Name'" } else { "with id $Id" }) is running. Running: $running."
+    }
+    return $matching
+}
+
+function New-SessionObject {
+    param($Process, [string] $Name, [string] $Command, [string] $WorkingDirectory, [string] $OutputPath)
+    return [pscustomobject]@{
+        PSTypeName       = 'ConsoleHarness.Session'
+        Process          = $Process
+        Id               = $Process.Id
+        Name             = $Name
+        Command          = $Command
+        WorkingDirectory = $WorkingDirectory
+        OutputPath       = $OutputPath
+        StartTime        = $Process.StartTime
+        ScreenPath       = [IO.Path]::Combine($script:SessionDirectory, "$($Process.Id).screen.txt")
+        RecordPath       = [IO.Path]::Combine($script:SessionDirectory, "$($Process.Id).json")
+    }
+}
+
+function Save-Session {
+    param($Session)
+    [void] (New-Item -ItemType Directory -Force -Path $script:SessionDirectory)
+    $record = @{
+        Id               = $Session.Id
+        Name             = $Session.Name
+        Command          = $Session.Command
+        WorkingDirectory = $Session.WorkingDirectory
+        OutputPath       = $Session.OutputPath
+        # Round-trip format: this is what tells a reused id from the original process.
+        StartTime        = $Session.StartTime.ToString('o')
+        ScreenPath       = $Session.ScreenPath
+    }
+    [IO.File]::WriteAllText($Session.RecordPath, (ConvertTo-Json -InputObject $record -Compress))
 }
 
 function Get-ConsoleScreen {
@@ -166,13 +260,41 @@ function Stop-ConsoleApp {
     <#
     .SYNOPSIS
     Stops the app (if it's still running) and cleans up. Always run this, even after a failure.
+
+    .DESCRIPTION
+    The whole process tree goes, not just the PowerShell wrapper: the app itself is a child of it
+    (and with mise's shims, a grandchild), and killing only the wrapper leaves it running in a
+    console nobody is attached to any more.
+
+    .EXAMPLE
+    Stop-ConsoleApp $session
+
+    .EXAMPLE
+    Stop-ConsoleApp -All      # everything this module has left running
     #>
-    [CmdletBinding()]
-    param([Parameter(Mandatory, ValueFromPipeline)] [PSTypeName('ConsoleHarness.Session')] $Session)
+    [CmdletBinding(DefaultParameterSetName = 'Session')]
+    param(
+        [Parameter(Mandatory, Position = 0, ValueFromPipeline, ParameterSetName = 'Session')] [PSTypeName('ConsoleHarness.Session')] $Session,
+        [Parameter(Mandatory, ParameterSetName = 'All')] [switch] $All
+    )
     process {
-        if (-not $Session.Process.HasExited) { Stop-Process -Id $Session.Id -Force -ErrorAction SilentlyContinue }
-        if (Test-Path -LiteralPath $Session.ScreenPath) { [IO.File]::Delete($Session.ScreenPath) }
+        $targets = if ($All) { Get-ConsoleApp } else { @($Session) }
+        foreach ($target in $targets) {
+            if (-not $target.Process.HasExited) { Stop-ProcessTree -Id $target.Id }
+            foreach ($path in $target.ScreenPath, $target.RecordPath) {
+                if ($path -and (Test-Path -LiteralPath $path)) { [IO.File]::Delete($path) }
+            }
+        }
     }
+}
+
+function Stop-ProcessTree {
+    param([int] $Id)
+    # Children first: killing the parent first would reparent them and leave them running.
+    foreach ($child in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$Id" -ErrorAction SilentlyContinue)) {
+        Stop-ProcessTree -Id ([int] $child.ProcessId)
+    }
+    Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue
 }
 
 function Invoke-Worker {
@@ -203,4 +325,4 @@ function Invoke-Worker {
     }
 }
 
-Export-ModuleMember -Function Start-ConsoleApp, Get-ConsoleScreen, Send-ConsoleKeys, Send-ConsoleText, Wait-ConsoleText, Stop-ConsoleApp
+Export-ModuleMember -Function Start-ConsoleApp, Get-ConsoleApp, Get-ConsoleScreen, Send-ConsoleKeys, Send-ConsoleText, Wait-ConsoleText, Stop-ConsoleApp

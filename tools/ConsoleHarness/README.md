@@ -56,6 +56,30 @@ Differences from AutoHotkey, all because the target is a console app rather than
   and `SendText` only pick a different injection method). A newline in literal text is still
   Enter and a tab is still Tab, as they would be if the text were typed.
 
+## Sessions outlive the process that started them
+
+The app runs in its own console, so it keeps running after the PowerShell process that started it
+exits. Give it a name and pick it up later — from another script, another shell, or a later step
+of the same job:
+
+```powershell
+Start-ConsoleApp -Command 'nvim README.md' -Name editor    # one process
+
+$session = Get-ConsoleApp -Name editor                     # another process, later
+Send-ConsoleKeys $session ':w{Enter}'
+Stop-ConsoleApp $session
+```
+
+`Get-ConsoleApp` with no arguments lists everything still running, and prunes the records of
+sessions that have ended. Records live in `%TEMP%\console-harness`, alongside the screens; a
+recorded id that has been reused by an unrelated process is spotted by its start time and
+discarded. `Stop-ConsoleApp -All` stops the lot, which is the way out of a script that failed
+before its `finally`.
+
+`Stop-ConsoleApp` kills the whole process tree. The app is a child of the PowerShell wrapper (and
+a grandchild, when a mise shim is involved), so stopping only the wrapper would leave it running
+in a console nothing is attached to.
+
 ## How it works
 
 The app runs in its own hidden console. Each call spawns a short-lived worker

@@ -115,9 +115,57 @@ Get either wrong and **the process dies silently**: no exception, no wasmtime tr
 That is worth knowing in itself, and it is not ghostty's doing — a four-line `.wat` module with a
 deliberately mismatched `call_indirect` kills the process the same way.
 
-## Known gaps
+## Planned: colours and styles
 
-- Colours and styles are discarded: the screen comes back as text.
+The screen currently comes back as text. libghostty has everything needed to do better, and this
+is the design that was settled on (2026-09-19) before writing any of it.
+
+**Three representations, very different costs.**
+
+1. *Snapshot formats* — `Get-PtyScreen -As Html|Vt`. This is one field in the formatter options
+   struct that is already built (`emit`, offset 4): `GhosttyFormatterFormat` is
+   `PLAIN=0, VT=1, HTML=2`. Minutes of work. Good for golden-file tests and for looking at what an
+   application drew (HTML opens in a browser); poor for assertions, since "is this red" becomes a
+   regular expression over markup, and any unrelated style change rewrites the snapshot.
+2. *Structured styled runs* — `Get-PtyScreen -Styled` returning, per row, runs of
+   `{ Text, Foreground, Background, Bold, Italic, Underline, Inverse, ... }`. This is what makes a
+   test read well: `(Get-PtyScreen $s -Styled | Where-Object { $_.Text -match 'error' }).Foreground.Rgb`.
+3. *Point queries* — `Get-PtyStyleAt -Row -Column`, `Find-PtyText -Pattern -WithStyle`. Same
+   bindings as (2) but only materialising what was asked for, which is where most assertions land.
+
+Do (1) first because it is nearly free, then (2) and (3) together since they share all the work.
+
+**Three decisions worth keeping.**
+
+- **Raw and effective colour, both.** A highlighted row is often `inverse` rather than literally
+  red-on-white, and a default foreground carries no colour at all. Expose `Foreground`/`Background`
+  as the application wrote them *and* `EffectiveForeground`/`EffectiveBackground` with inverse and
+  palette defaults resolved. Tests usually want the effective pair; the raw one is what proves an
+  application used the default colour rather than an explicit match for it.
+- **Resolve the palette, keep the tag.** A colour is `{ Kind = Default|Palette|Rgb; Index; R,G,B }`
+  with RGB resolved through `ghostty_color_palette_default`, because `palette:1` is not what a test
+  wants to assert against.
+- **Extract in C#, not PowerShell.** A 100x30 screen is 3000 cells; walking them one at a time
+  across the wasm boundary from PowerShell will crawl. It belongs beside `GhosttyReplySink.cs`,
+  returning whole rows in one pass. `ghostty_cell_get_multi` / `ghostty_row_get_multi` and the
+  render-state row iterators exist for exactly this.
+
+**The ABI, already looked up** (from `ghostty_type_json()`, so it needn't be derived again):
+
+| Type | Size | Fields |
+|---|---|---|
+| `GhosttyStyle` | 72 | `size@0`, `fg_color@8`, `bg_color@24`, `underline_color@40` (each `GhosttyStyleColor`), `bold@56`, `italic@57`, `faint@58`, `blink@59`, `inverse@60`, `invisible@61`, `strikethrough@62`, `overline@63`, `underline@64` (i32) |
+| `GhosttyStyleColor` | 16 | `tag@0` (`NONE=0, PALETTE=1, RGB=2`), `value@8` |
+| `GhosttyColorRgb` | 3 | `r@0, g@1, b@2` |
+| `GhosttyCellsView` | 8 | `ptr@0`, `len@4` |
+
+Relevant exports: `ghostty_cell_get(_multi)`, `ghostty_row_get(_multi)`, `ghostty_style_default`,
+`ghostty_style_is_default`, `ghostty_color_rgb_get`, `ghostty_color_palette_default`, and
+`ghostty_render_state_row_cells_*`.
+
+**Why it belongs here and not in ConsoleHarness:** conhost's grid carries only legacy 4-bit
+attributes, so an application's 24-bit colours are gone before that harness could read them.
+Styles would be a real reason to reach for the pty.
 
 ## Pieces
 

@@ -534,7 +534,9 @@ The earlier `nvim-data` (only shada/swap from Neovim 0.10) is at `nvim-data.bak`
   exception and no trap** - the value passed to `ghostty_terminal_set` is the function pointer
   itself, not a pointer to it (the header misleads; see `terminal.zig` `setTyped`), and the
   signature must match to the parameter. When wasm work dies silently, suspect an indirect call
-  before anything else.
+  before anything else. **Next piece of work there: colours and styles** - the design, the
+  decisions behind it and the ABI offsets are written up under "Planned" in its README, so start
+  from that rather than re-deriving them.
 - **`tools\ConsoleHarness` now makes TUI behaviour testable** (fzf, Neovim), so verify interactive
   changes yourself instead of asking the user to try them.
 

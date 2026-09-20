@@ -19,7 +19,9 @@ try {
 
 Sessions outlive the process that started them, as with ConsoleHarness: `-Name` labels one and
 `Get-PtyApp -Name` picks it up later. `Start-PtyApp -RawLog` keeps every byte the program wrote,
-which is how you find out what it actually asked the terminal for.
+which is how you find out what it actually asked the terminal for. The screen comes back as text,
+as escape sequences, as an HTML page, or as structured runs with their colours — see
+[Colours and styles](#colours-and-styles).
 
 ## Which harness to use
 
@@ -115,57 +117,82 @@ Get either wrong and **the process dies silently**: no exception, no wasmtime tr
 That is worth knowing in itself, and it is not ghostty's doing — a four-line `.wat` module with a
 deliberately mismatched `call_indirect` kills the process the same way.
 
-## Planned: colours and styles
+## Colours and styles
 
-The screen currently comes back as text. libghostty has everything needed to do better, and this
-is the design that was settled on (2026-09-19) before writing any of it.
+`Get-PtyScreen -As` gives the same screen four ways. This is the harness's reason to exist as much
+as mouse is: conhost's grid carries only legacy 4-bit attributes, so an application's 24-bit
+colours are gone before ConsoleHarness could read them.
 
-**Three representations, very different costs.**
-
-1. *Snapshot formats* — `Get-PtyScreen -As Html|Vt`. This is one field in the formatter options
-   struct that is already built (`emit`, offset 4): `GhosttyFormatterFormat` is
-   `PLAIN=0, VT=1, HTML=2`. Minutes of work. Good for golden-file tests and for looking at what an
-   application drew (HTML opens in a browser); poor for assertions, since "is this red" becomes a
-   regular expression over markup, and any unrelated style change rewrites the snapshot.
-2. *Structured styled runs* — `Get-PtyScreen -Styled` returning, per row, runs of
-   `{ Text, Foreground, Background, Bold, Italic, Underline, Inverse, ... }`. This is what makes a
-   test read well: `(Get-PtyScreen $s -Styled | Where-Object { $_.Text -match 'error' }).Foreground.Rgb`.
-3. *Point queries* — `Get-PtyStyleAt -Row -Column`, `Find-PtyText -Pattern -WithStyle`. Same
-   bindings as (2) but only materialising what was asked for, which is where most assertions land.
-
-Do (1) first because it is nearly free, then (2) and (3) together since they share all the work.
-
-**Three decisions worth keeping.**
-
-- **Raw and effective colour, both.** A highlighted row is often `inverse` rather than literally
-  red-on-white, and a default foreground carries no colour at all. Expose `Foreground`/`Background`
-  as the application wrote them *and* `EffectiveForeground`/`EffectiveBackground` with inverse and
-  palette defaults resolved. Tests usually want the effective pair; the raw one is what proves an
-  application used the default colour rather than an explicit match for it.
-- **Resolve the palette, keep the tag.** A colour is `{ Kind = Default|Palette|Rgb; Index; R,G,B }`
-  with RGB resolved through `ghostty_color_palette_default`, because `palette:1` is not what a test
-  wants to assert against.
-- **Extract in C#, not PowerShell.** A 100x30 screen is 3000 cells; walking them one at a time
-  across the wasm boundary from PowerShell will crawl. It belongs beside `GhosttyReplySink.cs`,
-  returning whole rows in one pass. `ghostty_cell_get_multi` / `ghostty_row_get_multi` and the
-  render-state row iterators exist for exactly this.
-
-**The ABI, already looked up** (from `ghostty_type_json()`, so it needn't be derived again):
-
-| Type | Size | Fields |
+| `-As` | What comes back | What it's for |
 |---|---|---|
-| `GhosttyStyle` | 72 | `size@0`, `fg_color@8`, `bg_color@24`, `underline_color@40` (each `GhosttyStyleColor`), `bold@56`, `italic@57`, `faint@58`, `blink@59`, `inverse@60`, `invisible@61`, `strikethrough@62`, `overline@63`, `underline@64` (i32) |
-| `GhosttyStyleColor` | 16 | `tag@0` (`NONE=0, PALETTE=1, RGB=2`), `value@8` |
-| `GhosttyColorRgb` | 3 | `r@0, g@1, b@2` |
-| `GhosttyCellsView` | 8 | `ptr@0`, `len@4` |
+| `Text` (default) | `string[]`, one per row | everything that doesn't care how it looked |
+| `Vt` | one string of escape sequences | golden files, or replaying the screen elsewhere |
+| `Html` | a whole page | looking at what an application drew |
+| `Styled` | one object per row, each with `Runs` | assertions |
 
-Relevant exports: `ghostty_cell_get(_multi)`, `ghostty_row_get(_multi)`, `ghostty_style_default`,
-`ghostty_style_is_default`, `ghostty_color_rgb_get`, `ghostty_color_palette_default`, and
-`ghostty_render_state_row_cells_*`.
+`Get-PtyStyleAt -Row -Column` answers about one position and reads only that row; `Find-PtyText
+-Pattern -WithStyle` matches a regular expression against each row and hands back the runs each
+match falls in. Rows and columns are zero-based, from the top-left of the viewport. `Text` and
+`Vt` take `-Scrollback`; `Html` and `Styled` are the viewport only, and refuse it rather than
+ignore it.
 
-**Why it belongs here and not in ConsoleHarness:** conhost's grid carries only legacy 4-bit
-attributes, so an application's 24-bit colours are gone before that harness could read them.
-Styles would be a real reason to reach for the pty.
+```powershell
+(Find-PtyText $session 'error' -WithStyle).Runs[0].EffectiveForeground.Hex   # -> #cc6666
+(Get-PtyScreen $session -As Styled)[3].Runs | Where-Object Bold
+Get-PtyScreen $session -As Html | Set-Content screen.html
+```
+
+A run is a stretch of cells sharing every attribute: `Column`, `Text`, `Bold`, `Italic`, `Faint`,
+`Blink`, `Inverse`, `Invisible`, `Strikethrough`, `Overline`, `Underline` (`None`, `Single`,
+`Double`, `Curly`, `Dotted`, `Dashed`), and four colours. Trailing blanks that carry no styling are
+dropped, so a short row is short; a coloured background reaching the edge is not blank and stays.
+
+Three decisions behind it:
+
+- **Raw and effective colour, both.** `Foreground`/`Background` are what the application wrote;
+  `EffectiveForeground`/`EffectiveBackground` are what you would see, with the terminal's defaults
+  filled in and `inverse` applied. Most assertions want the effective pair — a highlighted row is
+  usually inverse rather than literally coloured — but the raw one is what proves an application
+  used the default colour rather than an explicit match for it. Nothing else is folded in: `faint`
+  and `invisible` stay flags, because a test asserting on the colour of invisible text wants the
+  colour it was given.
+- **Resolve the palette, keep the tag.** A colour is
+  `{ Kind = Default | Palette | Rgb; Index; R; G; B; Hex }`. `palette:1` is not what a test wants to
+  compare against, so the RGB is looked up — in the terminal's *active* palette, so an application
+  that redefines a colour with OSC 4 is reported honestly.
+- **Walk the cells in C#.** A 100x30 screen is 3000 cells and each needs a handful of calls into
+  wasm. From PowerShell, with a ScriptMethod and a `ValueBox[]` per call, that crawls; from C# it
+  is milliseconds. `GhosttyScreenReader.cs` does the whole walk and the run-coalescing, and returns
+  plain objects that `ConvertTo-Json` sends over the pipe.
+
+Two things about the libghostty side, since both cost time:
+
+- **The render state's iterators are populated, not returned.** You make a row iterator and a
+  row-cells container yourself, then hand each to `ghostty_render_state_get(ROW_ITERATOR)` /
+  `ghostty_render_state_row_get(CELLS)` to be filled — so the out-parameter is a pointer to a cell
+  holding the handle, never the handle itself (`render.zig` reads it as `out.* orelse`, i.e. it
+  dereferences what you pass). Hand it the handle and it dereferences a bogus pointer, which is
+  the same shape of mistake as the callback above.
+- **`FG_COLOR` / `BG_COLOR` return `INVALID_VALUE` when there is no colour**, which is the normal
+  case, not an error. They resolve the palette but do not apply `inverse` (`render.zig`,
+  `rowCellsGetTypedInner`); that is the caller's job, and here it is done once so tests needn't.
+
+**The HTML is ours, not libghostty's.** Its own HTML formatter looked like the obvious answer and
+isn't, for two measured reasons: it emits the scrollback along with the viewport and can't be told
+not to (the formatter resolves its optional selection once, at construction, so a viewport
+selection would go stale as content scrolls), and it names palette colours as
+`var(--vt-palette-N)` while defining none of them, so on its own every palette colour renders as
+nothing. `-As Html` is therefore built from the same runs as `-As Styled`, where the colours are
+already resolved and `inverse` already applied.
+
+The same "emits history too" applies to `-As Vt`, which does come from the formatter: there the
+rows are lines, each starting with its own `ESC[0m`, so the viewport is taken the way the text
+path takes it — by dropping the rows the terminal says have scrolled off.
+
+**Runs can be one cell wider than the escape sequences suggest.** The program's output reaches
+libghostty through the console host, which renders it into its own grid and re-emits it, and a
+space written after an attribute reset can come back carrying the old attribute. Assert on
+`Text.Trim()` or on a run's colours rather than on exact run boundaries.
 
 ## Pieces
 
@@ -178,7 +205,9 @@ Styles would be a real reason to reach for the pty.
 | `PtyNativeOpenConsole.cs` | a pty hosted by Windows Terminal's OpenConsole, winconpty's way |
 | `Ghostty.ps1` | libghostty-vt in wasmtime: write bytes, read the screen, resize |
 | `GhosttyReplySink.cs` | the callback that collects the terminal's answers to a program's queries |
+| `GhosttyScreenReader.cs` | the cell walk: colours, attributes, and coalescing them into runs |
 | `QueryProbe.ps1` | a fixture that asks the terminal a question and prints the answer |
+| `ColourProbe.ps1` | a fixture that draws a screen with known colours and attributes |
 | `vendor/` | the emulator itself, and where it came from |
 | `lib/` | wasmtime, fetched by the `pty-harness` workload (gitignored) |
 
@@ -189,6 +218,6 @@ pwsh -File .	ools\PtyHarness\Test-PtyHarness.ps1
 ```
 
 They run real programs (cmd.exe, fzf) under a pseudo console: keyboard, resize that the program
-notices, session pickup from another process, cleanup, and mouse in both fzf renderers. The mouse
-ones are skipped when fzf isn't on PATH, and everything is skipped when the workload hasn't
-fetched wasmtime.
+notices, colours and attributes in all four forms, session pickup from another process, cleanup,
+and mouse in both fzf renderers. The mouse ones are skipped when fzf isn't on PATH, and everything
+is skipped when the workload hasn't fetched wasmtime.

@@ -255,7 +255,11 @@ Gotchas:
   `FindAndParseResourceDefinitions` error): a method's local variable can't share a property's
   name (`$gpu` vs `[string] $Gpu`), and a variable assigned only inside an inner `try` is "not
   assigned in the method". Parse-check every module after edits:
-  `[Management.Automation.Language.Parser]::ParseFile(...)`, ignoring the `using module` errors.- **Installer logs** for packages winget installs are next to winget's own logs in
+  `[Management.Automation.Language.Parser]::ParseFile(...)`, ignoring the `using module` errors.
+- **`Add-Type` compiles against reference assemblies, and `-ReferencedAssemblies` replaces the
+  default set rather than adding to it.** So `List<T>` fails with "could not be found" unless
+  `'System.Collections'` is named too (plain simple names work alongside full paths). That looked
+  like a hard limit once and isn't.- **Installer logs** for packages winget installs are next to winget's own logs in
   `DiagOutputDir` (e.g. `Git.Git.<version>-<timestamp>.log`), and include the full installer
   command line. Check there first when a package fails with a generic `InstallError`.
 - **Git for Windows cancels silently if Git is in use** (a Git Bash window, etc.);
@@ -393,7 +397,14 @@ try {
 - **Tests:** `pwsh -File tools\Test-Tools.ps1` runs every `tools\<module>\Test-*.ps1`
   (`-Name KeySpec` for one, `-SkipConsole` to skip the ones that drive a real console). The
   console tests need fzf on PATH — it isn't in Claude's shells, so prepend
-  `$env:LOCALAPPDATA\mise\shims`. Shared assertions live in `tools\TestSupport.ps1`; there's no
+  `$env:LOCALAPPDATA\mise\shims`. The fzf tests pin `$env:SHELL = 'cmd'` themselves, so they pass
+  from the Bash tool as well as the PowerShell one; don't remove that. Why: git bash exports
+  `SHELL=/bin/bash.exe`, and `NewExecutor` (fzf's `util_windows.go`) treats a `SHELL` it doesn't
+  recognise as POSIX and runs `cygpath -w` on it, which isn't on PATH when fzf was launched from
+  pwsh — so `--preview` never runs, and every mouse test fails with "the selection stayed at ''"
+  while everything else passes. Worth knowing beyond the tests: **anything spawning fzf from a
+  git-bash-derived environment inherits this.** (Measured 2026-09-19, after the same script came
+  back green from one tool and red from the other.) Shared assertions live in `tools\TestSupport.ps1`; there's no
   Pester because Windows ships only 3.4 and these tools must work on an unconfigured machine.
 - **The key/mouse parser is its own module** (`tools\KeySpec`, PowerShell 5.1-compatible, no
   console dependencies) so the planned ConPTY harness can share the syntax. Its tests are
@@ -534,9 +545,12 @@ The earlier `nvim-data` (only shada/swap from Neovim 0.10) is at `nvim-data.bak`
   exception and no trap** - the value passed to `ghostty_terminal_set` is the function pointer
   itself, not a pointer to it (the header misleads; see `terminal.zig` `setTyped`), and the
   signature must match to the parameter. When wasm work dies silently, suspect an indirect call
-  before anything else. **Next piece of work there: colours and styles** - the design, the
-  decisions behind it and the ABI offsets are written up under "Planned" in its README, so start
-  from that rather than re-deriving them.
+  before anything else. **Colours and styles work** (added 2026-09-19): `Get-PtyScreen -As
+  Text|Vt|Html|Styled`, plus `Get-PtyStyleAt` and `Find-PtyText -WithStyle`. `Styled` gives runs
+  of cells with raw *and* effective colours (palette resolved, inverse applied), which is the
+  form to assert against; the cell walk is C# (`GhosttyScreenReader.cs`) because 3000 cells from
+  PowerShell would crawl. Its README has the details, including two libghostty traps worth not
+  rediscovering.
 - **`tools\ConsoleHarness` now makes TUI behaviour testable** (fzf, Neovim), so verify interactive
   changes yourself instead of asking the user to try them.
 

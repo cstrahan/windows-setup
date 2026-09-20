@@ -21,8 +21,6 @@ namespace PtyHarness
 {
     public class GhosttyReplySink
     {
-        // Arrays, not a List: Add-Type compiles this against reference assemblies that only
-        // forward the generic collections and cannot resolve them.
         byte[] _pending = new byte[0];
 
         /// Matches GhosttyTerminalWritePtyFn: (terminal, userdata, data, len), all i32 in wasm32.

@@ -35,10 +35,14 @@ function Initialize-Wasmtime {
     # resolves by name.
     [void] [Runtime.InteropServices.NativeLibrary]::Load($native)
     Add-Type -Path $managed
-    # The reply callback is compiled against wasmtime; GhosttyReplySink.cs says why it can't be a
-    # PowerShell scriptblock. -IgnoreWarnings: the binding targets net8.0 and this runtime is
-    # newer, which is only a warning.
-    Add-Type -Path (Join-Path $PSScriptRoot 'GhosttyReplySink.cs') -ReferencedAssemblies $managed `
+    # The reply callback and the cell reader are compiled against wasmtime; each file says why it
+    # can't be PowerShell. System.Collections has to be named: Add-Type builds against reference
+    # assemblies, and without it the generic collections don't resolve. -IgnoreWarnings: the
+    # binding targets net8.0 and this runtime is newer, which is only a warning.
+    $references = @($managed, 'System.Collections')
+    Add-Type -Path (Join-Path $PSScriptRoot 'GhosttyReplySink.cs') -ReferencedAssemblies $references `
+        -IgnoreWarnings -WarningAction SilentlyContinue
+    Add-Type -Path (Join-Path $PSScriptRoot 'GhosttyScreenReader.cs') -ReferencedAssemblies $references `
         -IgnoreWarnings -WarningAction SilentlyContinue
 }
 
@@ -71,7 +75,10 @@ function New-GhosttyTerminal {
         Instance   = $instance
         Memory     = $instance.GetMemory('memory')
         Handle     = 0
-        Formatter  = 0
+        # One formatter per output format (plain, VT, HTML), made when first asked for.
+        Formatters = @{}
+        # Reads cells with their colours and attributes; made when first asked for.
+        Reader     = $null
         Columns    = $Columns
         Rows       = $Rows
         # Answers the terminal wants sent back to the program; the host drains these.
@@ -130,6 +137,51 @@ function New-GhosttyTerminal {
         }
     }
 
+    # A formatter for one GhosttyFormatterFormat (0 plain, 1 VT, 2 HTML), kept once it is made.
+    #
+    # GhosttyFormatterTerminalOptions, whose size and field offsets come from ghostty_type_json():
+    # { u32 size; enum emit@4; bool unwrap@8; bool trim@9; GhosttyFormatterTerminalExtra extra@12;
+    # const GhosttySelection* selection@36 } in 40 bytes. Zeroed means "the screen only, don't
+    # unwrap"; extra stays zeroed so no palette, modes or cursor state is emitted with it.
+    Add-Member -InputObject $terminal -MemberType ScriptMethod -Name GetFormatter -Value {
+        param([int] $Emit)
+        if ($this.Formatters.ContainsKey($Emit)) { return $this.Formatters[$Emit] }
+        $slot = $this.Call('ghostty_wasm_alloc_opaque', @())
+        if (-not $slot) { throw 'libghostty-vt: out of memory allocating a handle slot' }
+        $optionsSize = 40
+        $options = $this.Call('ghostty_wasm_alloc', @($optionsSize))
+        foreach ($offset in 0..($optionsSize - 1)) { $this.Memory.WriteByte($options + $offset, 0) }
+        $this.Memory.WriteInt32($options, $optionsSize)
+        $this.Memory.WriteInt32($options + 4, $Emit)
+        $this.Memory.WriteByte($options + 9, 1)
+        $this.Check($this.Call('ghostty_formatter_terminal_new', @(0, $slot, $this.Handle, $options)), 'ghostty_formatter_terminal_new')
+        $formatter = $this.Call('ghostty_wasm_take_opaque', @($slot))
+        [void] $this.Call('ghostty_wasm_free', @($options, $optionsSize))
+        [void] $this.Call('ghostty_wasm_free_opaque', @($slot))
+        $this.Formatters[$Emit] = $formatter
+        return $formatter
+    }
+
+    # The whole screen in one of the formatter's formats, as a single string.
+    Add-Member -InputObject $terminal -MemberType ScriptMethod -Name FormatText -Value {
+        param([int] $Emit)
+        $formatter = $this.GetFormatter($Emit)
+        $outPointer = $this.Call('ghostty_wasm_alloc', @(4))
+        $outLength = $this.Call('ghostty_wasm_alloc', @(4))
+        try {
+            $this.Check($this.Call('ghostty_formatter_format_alloc', @($formatter, 0, $outPointer, $outLength)), 'ghostty_formatter_format_alloc')
+            $pointer = $this.Memory.ReadInt32($outPointer)
+            $length = $this.Memory.ReadInt32($outLength)
+            if ($length -eq 0) { return '' }
+            $text = $this.Memory.ReadString($pointer, $length, [Text.Encoding]::UTF8)
+            [void] $this.Call('ghostty_free', @(0, $pointer, $length))
+            return $text
+        } finally {
+            [void] $this.Call('ghostty_wasm_free', @($outPointer, 4))
+            [void] $this.Call('ghostty_wasm_free', @($outLength, 4))
+        }
+    }
+
     # The screen as lines of text, as the app has drawn it: the visible rows by default, or
     # everything the terminal still holds with -Scrollback.
     #
@@ -137,26 +189,26 @@ function New-GhosttyTerminal {
     # blank rows - so the viewport can't be had by taking the last N lines. It is whatever follows
     # the rows that have scrolled off, which the terminal will say (SCROLLBACK_ROWS).
     Add-Member -InputObject $terminal -MemberType ScriptMethod -Name GetScreen -Value {
-        param([switch] $Scrollback)
-        $outPointer = $this.Call('ghostty_wasm_alloc', @(4))
-        $outLength = $this.Call('ghostty_wasm_alloc', @(4))
-        try {
-            $this.Check($this.Call('ghostty_formatter_format_alloc', @($this.Formatter, 0, $outPointer, $outLength)), 'ghostty_formatter_format_alloc')
-            $pointer = $this.Memory.ReadInt32($outPointer)
-            $length = $this.Memory.ReadInt32($outLength)
-            if ($length -eq 0) { return @() }
-            $text = $this.Memory.ReadString($pointer, $length, [Text.Encoding]::UTF8)
-            [void] $this.Call('ghostty_free', @(0, $pointer, $length))
-            $lines = @($text -split "`r?`n")
-            if ($Scrollback) { return $lines }
-            $scrolledOff = $this.GetNumber(15)   # SCROLLBACK_ROWS
-            if ($scrolledOff -le 0) { return $lines }
-            if ($scrolledOff -ge $lines.Count) { return @() }
-            return @($lines | Select-Object -Skip $scrolledOff)
-        } finally {
-            [void] $this.Call('ghostty_wasm_free', @($outPointer, 4))
-            [void] $this.Call('ghostty_wasm_free', @($outLength, 4))
-        }
+        param([switch] $Scrollback, [int] $Emit = 0)
+        $text = $this.FormatText($Emit)
+        if ($text -eq '') { return @() }
+        $lines = @($text -split "`r?`n")
+        if ($Scrollback) { return $lines }
+        $scrolledOff = $this.GetNumber(15)   # SCROLLBACK_ROWS
+        if ($scrolledOff -le 0) { return $lines }
+        if ($scrolledOff -ge $lines.Count) { return @() }
+        return @($lines | Select-Object -Skip $scrolledOff)
+    }
+
+    # The viewport's cells with their colours and attributes, coalesced into runs. -1 reads every
+    # row; a row number reads just that one.
+    #
+    # Unlike the text formatter this is the viewport by construction: the render state snapshots
+    # what is visible, so there is no scrolled-off count to subtract.
+    Add-Member -InputObject $terminal -MemberType ScriptMethod -Name GetStyled -Value {
+        param([int] $Row = -1)
+        if (-not $this.Reader) { $this.Reader = [PtyHarness.GhosttyScreenReader]::new($this.Instance) }
+        return $this.Reader.Read($this.Handle, $Row)
     }
 
     Add-Member -InputObject $terminal -MemberType ScriptMethod -Name Resize -Value {
@@ -169,27 +221,18 @@ function New-GhosttyTerminal {
     }
 
     Add-Member -InputObject $terminal -MemberType ScriptMethod -Name Dispose -Value {
-        if ($this.Formatter) { [void] $this.Call('ghostty_formatter_free', @($this.Formatter)); $this.Formatter = 0 }
+        if ($this.Reader) { $this.Reader.Dispose(); $this.Reader = $null }
+        foreach ($formatter in @($this.Formatters.Values)) { [void] $this.Call('ghostty_formatter_free', @($formatter)) }
+        $this.Formatters.Clear()
         if ($this.Handle) { [void] $this.Call('ghostty_terminal_free', @($this.Handle)); $this.Handle = 0 }
     }
 
-    # The terminal itself, and a formatter that reads its current state on every call.
+    # The terminal itself. Formatters and the cell reader are made on first use, so a session that
+    # only ever reads text never builds a render state.
     $slot = $terminal.Call('ghostty_wasm_alloc_opaque', @())
     if (-not $slot) { throw 'libghostty-vt: out of memory allocating a handle slot' }
     $terminal.Check($terminal.Call('ghostty_terminal_new', @(0, $slot, $Columns, $Rows)), 'ghostty_terminal_new')
     $terminal.Handle = $terminal.Call('ghostty_wasm_take_opaque', @($slot))
-
-    # GhosttyFormatterTerminalOptions, whose size and field offsets come from ghostty_type_json():
-    # { size_t size; enum emit; bool unwrap; bool trim; enum extra; const GhosttySelection* } in
-    # 40 bytes. Zeroed means "emit text, don't unwrap, whole screen"; byte 9 is trim.
-    $optionsSize = 40
-    $options = $terminal.Call('ghostty_wasm_alloc', @($optionsSize))
-    foreach ($offset in 0..($optionsSize - 1)) { $terminal.Memory.WriteByte($options + $offset, 0) }
-    $terminal.Memory.WriteInt32($options, $optionsSize)
-    $terminal.Memory.WriteByte($options + 9, 1)
-    $terminal.Check($terminal.Call('ghostty_formatter_terminal_new', @(0, $slot, $terminal.Handle, $options)), 'ghostty_formatter_terminal_new')
-    $terminal.Formatter = $terminal.Call('ghostty_wasm_take_opaque', @($slot))
-    [void] $terminal.Call('ghostty_wasm_free', @($options, $optionsSize))
     [void] $terminal.Call('ghostty_wasm_free_opaque', @($slot))
 
     # Answer the questions applications ask the terminal. The callback is a host function placed

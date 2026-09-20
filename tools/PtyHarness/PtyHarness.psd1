@@ -5,8 +5,9 @@
     Author            = 'Charles Strahan'
     Description       = 'Drive an interactive program through a pseudo console, rendered with libghostty-vt.'
     PowerShellVersion = '7.0'
-    FunctionsToExport = @('Start-PtyApp', 'Get-PtyApp', 'Get-PtyScreen', 'Get-PtyInfo', 'Send-PtyKeys',
-                          'Send-PtyText', 'Send-PtyBytes', 'Wait-PtyText', 'Set-PtySize', 'Stop-PtyApp')
+    FunctionsToExport = @('Start-PtyApp', 'Get-PtyApp', 'Get-PtyScreen', 'Get-PtyStyleAt',
+                          'Find-PtyText', 'Get-PtyInfo', 'Send-PtyKeys', 'Send-PtyText',
+                          'Send-PtyBytes', 'Wait-PtyText', 'Set-PtySize', 'Stop-PtyApp')
     CmdletsToExport   = @()
     VariablesToExport = @()
     AliasesToExport   = @()

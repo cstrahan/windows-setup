@@ -262,24 +262,181 @@ function Get-PtyApp {
 function Get-PtyScreen {
     <#
     .SYNOPSIS
-    Returns the screen as the program has drawn it, one string per row.
+    Returns the screen as the program has drawn it: text by default, or with its colours.
 
     .DESCRIPTION
-    The visible rows by default. With -Scrollback, everything the terminal still holds, oldest
-    first, which is what has scrolled off plus what is on screen.
+    -As Text (the default) gives one string per row: the visible rows, or with -Scrollback
+    everything the terminal still holds, oldest first.
+
+    The other three keep the colours and attributes, which conhost's grid cannot (it has only
+    legacy 4-bit attributes), and all cover the viewport only:
+
+    - Vt    the screen as escape sequences, for a golden file or for replaying it somewhere else.
+    - Html  a whole page, palette and default colours included, for looking at what was drawn.
+    - Styled  one object per row, each holding runs of cells that share every attribute. This is
+      the one to assert against; see Get-PtyStyleAt and Find-PtyText for narrower questions.
+
+    .EXAMPLE
+    Get-PtyScreen $session -NonEmpty
+
+    .EXAMPLE
+    (Get-PtyScreen $session -As Styled)[3].Runs | Where-Object Bold
+
+    .EXAMPLE
+    Get-PtyScreen $session -As Html | Set-Content screen.html
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory, Position = 0, ValueFromPipeline)] [PSTypeName('PtyHarness.Session')] $Session,
-        # Include what has scrolled out of view.
+        [ValidateSet('Text', 'Vt', 'Html', 'Styled')] [string] $As = 'Text',
+        # Include what has scrolled out of view. Text only: the rest are the viewport.
         [switch] $Scrollback,
         [switch] $NonEmpty
     )
     process {
-        $response = Invoke-HostRequest -Session $Session -Request @{ op = 'screen'; scrollback = [bool] $Scrollback }
+        if ($NonEmpty -and $As -ne 'Text') { throw "-NonEmpty only applies to -As Text." }
+        if ($Scrollback -and $As -notin 'Text', 'Vt') {
+            throw "-Scrollback doesn't apply to -As $As, which reads the viewport."
+        }
+        if ($As -eq 'Styled' -or $As -eq 'Html') {
+            $response = Invoke-HostRequest -Session $Session -Request @{ op = 'styled'; row = -1 }
+            if ($As -eq 'Styled') { return @($response.styledRows) }
+            return ConvertTo-PtyHtmlDocument -Response $response
+        }
+        $response = Invoke-HostRequest -Session $Session -Request @{
+            op = 'screen'; scrollback = [bool] $Scrollback; format = $As
+        }
+        if ($As -eq 'Vt') { return @($response.lines) -join "`n" }
         $lines = @($response.lines)
         if ($NonEmpty) { $lines = @($lines | Where-Object { $_.Trim() }) }
         return $lines
+    }
+}
+
+function ConvertTo-PtyHtmlDocument {
+    <#
+    .SYNOPSIS
+    Renders styled rows as a page a browser can show.
+
+    .DESCRIPTION
+    Built from the same runs as -As Styled rather than from libghostty's own HTML, for two
+    reasons: that formatter emits the scrollback along with the viewport and can't be told not
+    to, and it names palette colours as var(--vt-palette-N) while defining none of them. Here the
+    colours are already resolved and inverse is already applied, so the markup says what it means.
+    #>
+    param($Response)
+
+    $rows = foreach ($row in @($Response.styledRows)) {
+        $line = [Text.StringBuilder]::new()
+        foreach ($run in @($row.Runs)) {
+            # Runs know the column they start at; the gaps are the blanks that were trimmed out.
+            $column = [int] $run.Column
+            if ($line.Length -lt $column) { [void] $line.Append(' ', $column - $line.Length) }
+            [void] $line.Append((ConvertTo-PtyHtmlRun -Run $run -Response $Response))
+        }
+        $line.ToString()
+    }
+
+    return @"
+<!doctype html>
+<html><head><meta charset="utf-8"><title>pty screen</title>
+<style>
+body { margin: 0; padding: 1rem; background: $($Response.background.Hex); color: $($Response.foreground.Hex); }
+pre { margin: 0; font: 14px/1.2 Consolas, monospace; }
+</style></head>
+<body><pre>$($rows -join "`n")</pre></body></html>
+"@
+}
+
+function ConvertTo-PtyHtmlRun {
+    param($Run, $Response)
+
+    $text = [Net.WebUtility]::HtmlEncode($Run.Text)
+    $style = @()
+    # Only what differs from the terminal's own colours, so the markup stays readable.
+    if ($Run.EffectiveForeground.Hex -ne $Response.foreground.Hex) { $style += "color:$($Run.EffectiveForeground.Hex)" }
+    if ($Run.EffectiveBackground.Hex -ne $Response.background.Hex) { $style += "background-color:$($Run.EffectiveBackground.Hex)" }
+    if ($Run.Bold) { $style += 'font-weight:bold' }
+    if ($Run.Italic) { $style += 'font-style:italic' }
+    if ($Run.Faint) { $style += 'opacity:0.6' }
+    if ($Run.Invisible) { $style += 'visibility:hidden' }
+    $decorations = @()
+    if ($Run.Underline -ne 'None') { $decorations += 'underline' }
+    if ($Run.Strikethrough) { $decorations += 'line-through' }
+    if ($Run.Overline) { $decorations += 'overline' }
+    if ($decorations) { $style += "text-decoration:$($decorations -join ' ')" }
+
+    if (-not $style) { return $text }
+    return "<span style=""$($style -join ';')"">$text</span>"
+}
+
+function Get-PtyStyleAt {
+    <#
+    .SYNOPSIS
+    Returns the run of cells covering one position, with its colours and attributes.
+
+    .DESCRIPTION
+    Rows and columns are zero-based and count from the top-left of the viewport. Returns nothing
+    when that position is past the end of what the program drew.
+
+    .EXAMPLE
+    (Get-PtyStyleAt $session -Row 0 -Column 4).EffectiveForeground.Hex
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, Position = 0)] [PSTypeName('PtyHarness.Session')] $Session,
+        [Parameter(Mandatory)] [int] $Row,
+        [Parameter(Mandatory)] [int] $Column
+    )
+    # Only the row asked for is read, so this stays cheap enough to call in a loop.
+    $response = Invoke-HostRequest -Session $Session -Request @{ op = 'styled'; row = $Row }
+    $rows = @($response.styledRows)
+    if (-not $rows) { return }
+    foreach ($run in @($rows[0].Runs)) {
+        if ($Column -ge $run.Column -and $Column -lt ($run.Column + $run.Text.Length)) { return $run }
+    }
+}
+
+function Find-PtyText {
+    <#
+    .SYNOPSIS
+    Finds text on the screen and says where it is - and, with -WithStyle, how it looks.
+
+    .DESCRIPTION
+    Matches a regular expression against each row of the viewport and returns one object per
+    match: Row, Column, Text, and with -WithStyle the runs the match overlaps. A match that is
+    drawn in one colour throughout has exactly one run.
+
+    .EXAMPLE
+    Find-PtyText $session 'error' -WithStyle | ForEach-Object { $_.Runs[0].EffectiveForeground.Hex }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, Position = 0)] [PSTypeName('PtyHarness.Session')] $Session,
+        [Parameter(Mandatory, Position = 1)] [string] $Pattern,
+        # Include the styled runs the match falls in.
+        [switch] $WithStyle
+    )
+    $response = Invoke-HostRequest -Session $Session -Request @{ op = 'styled'; row = -1 }
+    foreach ($row in @($response.styledRows)) {
+        $runs = @($row.Runs)
+        # Rebuild the row's text from its runs: each one knows the column it starts at, so the
+        # gaps between them are the blanks that were trimmed out.
+        $line = [Text.StringBuilder]::new()
+        foreach ($run in $runs) {
+            if ($line.Length -lt $run.Column) { [void] $line.Append(' ', $run.Column - $line.Length) }
+            [void] $line.Append($run.Text)
+        }
+        foreach ($match in [regex]::Matches($line.ToString(), $Pattern)) {
+            $result = [ordered]@{ Row = $row.Y; Column = $match.Index; Text = $match.Value }
+            if ($WithStyle) {
+                $last = $match.Index + $match.Length
+                $result['Runs'] = @($runs | Where-Object {
+                    $_.Column -lt $last -and ($_.Column + $_.Text.Length) -gt $match.Index
+                })
+            }
+            [pscustomobject] $result
+        }
     }
 }
 
@@ -427,5 +584,5 @@ function Stop-PtyApp {
     }
 }
 
-Export-ModuleMember -Function Start-PtyApp, Get-PtyApp, Get-PtyScreen, Get-PtyInfo, Send-PtyKeys,
-    Send-PtyText, Send-PtyBytes, Wait-PtyText, Set-PtySize, Stop-PtyApp
+Export-ModuleMember -Function Start-PtyApp, Get-PtyApp, Get-PtyScreen, Get-PtyStyleAt, Find-PtyText,
+    Get-PtyInfo, Send-PtyKeys, Send-PtyText, Send-PtyBytes, Wait-PtyText, Set-PtySize, Stop-PtyApp

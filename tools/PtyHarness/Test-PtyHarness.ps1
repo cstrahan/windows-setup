@@ -79,6 +79,24 @@ Test-Case 'the screen is the viewport, and -Scrollback is everything' {
     }
 }
 
+Test-Case 'every form of the screen is the viewport, not the history' {
+    # libghostty's formatter emits history and viewport together, so Vt and Html would carry the
+    # whole scrollback if nothing trimmed them.
+    Use-Pty 'cmd.exe' 80 10 'Microsoft Windows' {
+        param($session)
+        Send-PtyKeys $session 'for /L %i in (1,1,30) do @echo line %i{Enter}' -SettleMilliseconds 1200 | Out-Null
+        foreach ($form in 'Vt', 'Html') {
+            $screen = Get-PtyScreen $session -As $form
+            Assert-Equal $true ($screen -match 'line 30') "-As $form should show the last line"
+            Assert-Equal $false ($screen -match 'line 1\D') "-As $form should not carry the scrollback"
+        }
+        $styled = @(Get-PtyScreen $session -As Styled)
+        Assert-Equal 10 $styled.Count 'one entry per viewport row'
+        # And Vt keeps the history when it is asked for.
+        Assert-Equal $true ((Get-PtyScreen $session -As Vt -Scrollback) -match 'line 1\D') '-Scrollback should show it'
+    }
+}
+
 Test-Case 'the terminal answers what a program asks it' {
     # Without this, a program that queries the terminal waits for a reply that never comes, and
     # the query itself can end up drawn on the screen (Neovim's XTGETTCAP did).
@@ -88,6 +106,88 @@ Test-Case 'the terminal answers what a program asks it' {
         $line = Get-PtyScreen $session -NonEmpty | Where-Object { $_ -match 'ANSWER:' } | Select-Object -First 1
         # A primary device attributes reply: ESC [ ? ... c
         Assert-Equal $true ($line -match 'ANSWER:<ESC>\[\?[0-9;]+c:END') "the program was told: '$line'"
+    }
+}
+
+$colourProbe = Join-Path $PSScriptRoot 'ColourProbe.ps1'
+
+Test-Case 'colours and attributes come back as styled runs' {
+    Use-Pty "pwsh -NoProfile -File `"$colourProbe`"" 40 8 'READY' {
+        param($session)
+        $rows = @(Get-PtyScreen $session -As Styled)
+        Assert-Equal 8 $rows.Count 'one entry per viewport row'
+
+        $red = @($rows[1].Runs)[0]
+        Assert-Equal 'red' $red.Text.Trim()
+        Assert-Equal 'Palette' $red.Foreground.Kind
+        Assert-Equal 1 $red.Foreground.Index 'SGR 31 is palette entry 1'
+        Assert-Equal $true ($red.Foreground.Hex -match '^#[0-9a-f]{6}$') "palette should be resolved, got '$($red.Foreground.Hex)'"
+
+        $rgb = @($rows[1].Runs) | Where-Object { $_.Text -eq 'bold-rgb' } | Select-Object -First 1
+        Assert-Equal 'Rgb' $rgb.Foreground.Kind
+        Assert-Equal '#0080ff' $rgb.Foreground.Hex
+        Assert-Equal $true $rgb.Bold
+
+        Assert-Equal 'Single' (@($rows[3].Runs)[0].Underline)
+
+        # A plain row still reports the terminal's own colours, and says they are the default.
+        $plain = @($rows[0].Runs)[0]
+        Assert-Equal 'plain' $plain.Text
+        Assert-Equal 'Default' $plain.Foreground.Kind
+        Assert-Equal $plain.Foreground.Hex $plain.EffectiveForeground.Hex
+    }
+}
+
+Test-Case 'inverse is resolved into the effective colours' {
+    # A highlighted row is usually inverse rather than literally coloured, so a test that asks
+    # "what does this look like" has to get the swap done for it.
+    Use-Pty "pwsh -NoProfile -File `"$colourProbe`"" 40 8 'READY' {
+        param($session)
+        $rows = @(Get-PtyScreen $session -As Styled)
+        $inverse = @($rows[2].Runs)[0]
+        Assert-Equal $true $inverse.Inverse
+        Assert-Equal $inverse.Background.Hex $inverse.EffectiveForeground.Hex 'inverse swaps the pair'
+        Assert-Equal $inverse.Foreground.Hex $inverse.EffectiveBackground.Hex
+
+        $background = @($rows[2].Runs) | Where-Object { $_.Background.Kind -eq 'Palette' } | Select-Object -First 1
+        Assert-Equal 4 $background.Background.Index 'SGR 44 is palette entry 4'
+    }
+}
+
+Test-Case 'a point query and a search report the style' {
+    Use-Pty "pwsh -NoProfile -File `"$colourProbe`"" 40 8 'READY' {
+        param($session)
+        $at = Get-PtyStyleAt $session -Row 1 -Column 0
+        Assert-Equal 'Palette' $at.Foreground.Kind 'the first cell of the red run'
+        Assert-Equal $null (Get-PtyStyleAt $session -Row 0 -Column 39) 'past the end of what was drawn'
+
+        $found = @(Find-PtyText $session 'bold-\w+' -WithStyle)
+        Assert-Equal 1 $found.Count
+        Assert-Equal 1 $found[0].Row
+        Assert-Equal 8 $found[0].Column
+        Assert-Equal 'bold-rgb' $found[0].Text
+        Assert-Equal '#0080ff' @($found[0].Runs)[0].EffectiveForeground.Hex
+    }
+}
+
+Test-Case 'the screen can be had as VT or as a page to look at' {
+    Use-Pty "pwsh -NoProfile -File `"$colourProbe`"" 40 8 'READY' {
+        param($session)
+        $escape = [char] 27
+        $vt = Get-PtyScreen $session -As Vt
+        Assert-Equal $true ($vt -match "$escape\[38;2;0;128;255m") 'the RGB colour, as an escape sequence'
+        Assert-Equal $true ($vt -match 'bold-rgb')
+
+        $html = Get-PtyScreen $session -As Html
+        Assert-Equal $true ($html -match 'color:#0080ff') 'the RGB colour, as CSS'
+        Assert-Equal $true ($html -match 'font-weight:bold')
+        # Palette colours are resolved, not left as the CSS variables libghostty would emit and
+        # never define.
+        Assert-Equal $true ($html -match 'color:#[0-9a-f]{6}[^>]*>red') 'the palette colour, resolved'
+        Assert-Equal $true ($html -match '(?s)<html>.*</html>') 'a whole document, not a fragment'
+
+        Assert-Throws { Get-PtyScreen $session -As Html -Scrollback } "doesn't apply to -As Html"
+        Assert-Throws { Get-PtyScreen $session -As Vt -NonEmpty } '-NonEmpty only applies'
     }
 }
 
@@ -120,6 +220,14 @@ if (-not (Get-Command fzf -ErrorAction SilentlyContinue)) {
     Write-Host "  skipped the mouse tests: fzf isn't on PATH." -ForegroundColor Yellow
     Complete-Tests
 }
+
+# Pin the shell fzf runs --preview with, so these tests don't depend on the environment they were
+# started from. Run from git bash, SHELL is /bin/bash.exe: fzf treats that as a POSIX shell and
+# converts the path with cygpath, which isn't on PATH when fzf was launched from pwsh, so the
+# preview never runs and every assertion here times out with an empty selection. fzf's own tests
+# pin it for the same reason. 'cmd' rather than 'pwsh' because the assertions expect cmd's
+# quoting: fzf substitutes {} as "item 1", quotes included, and pwsh would strip them.
+$env:SHELL = 'cmd'
 
 # Mouse. Both fzf renderers are driven with the same SGR reports: the console host adapts, turning
 # them into console records for the tcell renderer and passing them through for the light one.

@@ -102,7 +102,19 @@ try {
                     $response = @{ ok = $true }
                     switch ($request.op) {
                         'screen' {
-                            $response['lines'] = @($terminal.GetScreen([bool] $request.scrollback))
+                            # 'Vt' asks the formatter for escape sequences instead of plain text.
+                            # Either way the rows come back as lines, so the same scrolled-off
+                            # count separates the viewport from the history.
+                            $emit = if ($request.format -eq 'Vt') { 1 } else { 0 }
+                            $response['lines'] = @($terminal.GetScreen([bool] $request.scrollback, $emit))
+                        }
+                        'styled' {
+                            $row = if ($null -ne $request.row) { [int] $request.row } else { -1 }
+                            $styled = $terminal.GetStyled($row)
+                            # Not 'rows': every response carries the terminal's height under that.
+                            $response['styledRows'] = $styled.Rows
+                            $response['foreground'] = $styled.Foreground
+                            $response['background'] = $styled.Background
                         }
                         'send' {
                             if ($request.bytes) {
@@ -127,7 +139,8 @@ try {
 
                         $response['exited'] = $exited -or (Test-PtyProcessExited $pty)
                     }
-                    $writer.WriteLine(($response | ConvertTo-Json -Depth 5 -Compress))
+                    # Depth 8: a styled screen nests rows, runs and each run's colours.
+                    $writer.WriteLine(($response | ConvertTo-Json -Depth 8 -Compress))
                 }
                 $reader.Dispose()
                 $writer.Dispose()

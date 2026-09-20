@@ -19,6 +19,15 @@ if ($SkipConsole) {
     Write-Host "`nDriving a real console (fzf)"
     Import-Module (Join-Path $PSScriptRoot 'ConsoleHarness.psd1') -Force
 
+    # Pin the shell fzf runs --preview with, so these tests don't depend on the environment they
+    # were started from. Run from git bash, SHELL is /bin/bash.exe: fzf treats that as a POSIX
+    # shell and converts the path with cygpath, which isn't on PATH when fzf was launched from
+    # pwsh, so the preview never runs and the mouse assertions time out with an empty selection.
+    # fzf's own tests pin it for the same reason. 'cmd' rather than 'pwsh' because the assertions
+    # expect cmd's quoting: fzf substitutes {} as "item 1", quotes included, and pwsh would strip
+    # them.
+    $env:SHELL = 'cmd'
+
     # fzf over a fixed list, so the tests don't depend on the current directory.
     $items = 'alpha', 'beta,gamma', 'enter-the-void', 'delta'
     $command = "@('$($items -join "','")') | fzf"

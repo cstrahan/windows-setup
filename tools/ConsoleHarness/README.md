@@ -63,15 +63,48 @@ This was worked out by experiment, and the details cost enough to be worth writi
   one at column 90 the right window only.
 - **fzf takes neither, in a hidden console.** It enables `ENABLE_MOUSE_INPUT`, yet ignored wheel,
   clicks, double-clicks and move-then-wheel, in the list, in the preview pane and outside its box
-  alike. Under Windows Terminal the same fzf handles all of those, because that's a ConPTY with
-  VT input, where it gets SGR sequences. The legacy console host is the difference: conhost
-  [doesn't forward wheel events to an app in alternate-screen mode](https://github.com/openai/codex/issues/12457),
-  and [fzf's Windows notes](https://github.com/junegunn/fzf/wiki/Windows) target Windows Terminal.
-  **So fzf's mouse behaviour can't be tested through this harness**; its keyboard behaviour can.
-  Testing it would mean running the app under a ConPTY, which would also mean emulating a
-  terminal to read the screen — the thing this design exists to avoid.
+  alike. **Why is still open** — see the correction below. Its keyboard behaviour tests fine.
 - Coordinates here are **character cells relative to the visible window**, 0-based, matching the
   row indices `Get-ConsoleScreen` returns — not pixels, and there is no `CoordMode` to change.
+
+### Correction: why fzf's mouse works in Windows Terminal (2026-09-19)
+
+An earlier version of this file claimed fzf gets mouse under Windows Terminal "because that's a
+ConPTY with VT input". That was wrong, and the real reason is worth knowing, because it explains
+what would have to change here.
+
+**Windows Terminal does not use this machine's console host.** It ships its own and launches that
+as the pty host — `src/winconpty/winconpty.cpp:45-58` in the terminal source returns "the path to
+either conhost.exe or the side-by-side OpenConsole", preferring the bundled one:
+
+| | |
+|---|---|
+| Bundled with Windows Terminal 1.21 | `OpenConsole.exe` 1.21.2502.04001 |
+| This machine's inbox host | `conhost.exe` 10.0.19041.1 |
+
+The modern host has mouse plumbing in both directions, and the old one does not:
+
+- outbound (`src/host/getset.cpp:383`): when a client turns on `ENABLE_MOUSE_INPUT` with quick-edit
+  off, the host sends `ESC[?1003;1006h` to the terminal, asking it to report mouse;
+- inbound (`src/terminal/parser/InputStateMachineEngine.cpp:402`): SGR mouse reports become
+  `INPUT_RECORD` mouse events, with no mouse-mode gate — only a passthrough when the client has
+  virtual-terminal input enabled.
+
+So under Windows Terminal, fzf receives mouse as ordinary console records, synthesised by
+OpenConsole from the SGR reports WT sends it. Measured against the inbox host used by
+`CreatePseudoConsole` on this machine, neither half happens: a client enabling `ENABLE_MOUSE_INPUT`
+produced no `ESC[?1003;1006h`, and injected SGR reports produced no records at all (they arrived
+as literal keystrokes). It is a version gap, not a design limit.
+
+Two consequences:
+
+- A pty harness only helps with fzf's mouse if it hosts the pty with **WT's OpenConsole.exe**, the
+  way `winconpty` does (`--headless --width --height --signal --server`, child attached through
+  `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`). Plain `CreatePseudoConsole` inherits the old host and
+  the old behaviour. See `tools\PtyHarness`.
+- **Why fzf ignores records injected here is still unknown.** Records demonstrably arrive, and
+  under WT fzf acts on records of the same shape, so something about fzf's Windows input path is
+  the missing piece rather than the injection.
 
 ## How it works
 

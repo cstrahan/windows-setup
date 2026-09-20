@@ -369,6 +369,17 @@ try {
   `pwsh` wrapper — before that was fixed, tests left 180 stray `fzf`/mise-shim processes behind.
   `Stop-ConsoleApp -All` clears everything the module started, which is the cleanup to run after
   a script died before its `finally`.
+- **Mouse, size and scrollback** (all verified 2026-09-19): `{Click 40 10}`, `{Click 5 5 Right}`,
+  `{LButton down}`…`{LButton up}`, `{WheelDown 3}` (coordinates are cells in the visible window and
+  stick between tokens); `Get-ConsoleInfo`, `Set-ConsoleSize`; `Get-ConsoleScreen -Scrollback` /
+  `-FromRow`/`-Rows` and `Move-ConsoleView -Lines/-Top/-Start/-End`. The hard-won details are in
+  the README, but in short: **an app gets mouse either as console records or as SGR escape
+  sequences, never both**, depending on whether it has `ENABLE_VIRTUAL_TERMINAL_INPUT` (Neovim) or
+  `ENABLE_MOUSE_INPUT` (fzf); the harness reads the mode and picks. **fzf's mouse can't be tested
+  here at all** — it only handles mouse under Windows Terminal's ConPTY, not a legacy console —
+  so don't spend time on it. An app on the **alternate screen buffer** (any full-screen TUI)
+  refuses buffer/window resizes with `ERROR_INVALID_HANDLE`, so `Set-ConsoleSize` falls back to
+  resizing conhost's window; it also has no scrollback.
 - **Tests:** `pwsh -File tools\ConsoleHarness\Test-ConsoleHarness.ps1` (add `-SkipConsole` for the
   parser cases alone; the rest drive a real fzf, so fzf must be on PATH — it isn't in Claude's
   shells, so prepend `$env:LOCALAPPDATA\mise\shims`).

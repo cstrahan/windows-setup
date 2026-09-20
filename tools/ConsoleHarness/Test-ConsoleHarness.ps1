@@ -141,6 +141,59 @@ Test-Case 'an empty specification sends nothing' {
     Assert-Equal 0 (ConvertFrom-KeySpec '').Count
 }
 
+Test-Case 'mouse tokens carry position, button and action' {
+    $events = ConvertFrom-KeySpec '{Click 40 10}'
+    Assert-Equal 'Mouse' $events[0].Type
+    Assert-Equal 3 $events.Count 'a move, then press and release'
+    Assert-Equal 'Move' $events[0].Action
+    Assert-Equal 40 $events[1].X
+    Assert-Equal 10 $events[1].Y
+    Assert-Equal 'Left' $events[1].Button
+    Assert-Equal 'Down' $events[1].Action
+    Assert-Equal 'Up' $events[2].Action
+}
+
+Test-Case 'the pointer sticks between tokens' {
+    # {WheelDown} has no coordinates, so it happens where {Click} left the pointer.
+    # Assign first: the result is returned as one array object, so piping it straight into
+    # Where-Object would hand the whole array over as a single item.
+    $all = ConvertFrom-KeySpec '{Click 40 10}{WheelDown}'
+    $events = @($all | Where-Object { $_.Action -eq 'Wheel' })
+    Assert-Equal 1 $events.Count
+    Assert-Equal 40 $events[0].X
+    Assert-Equal 10 $events[0].Y
+    # With no coordinates at all, the worker fills in the middle of the window.
+    Assert-Equal -1 (ConvertFrom-KeySpec '{WheelUp}')[0].X
+}
+
+Test-Case 'wheel tokens: direction, axis and count' {
+    Assert-Equal -1 (ConvertFrom-KeySpec '{WheelDown}')[0].Notches
+    Assert-Equal 1 (ConvertFrom-KeySpec '{WheelUp}')[0].Notches
+    Assert-Equal 3 (ConvertFrom-KeySpec '{WheelDown 3}').Count 'one event per notch'
+    Assert-Equal 'Horizontal' (ConvertFrom-KeySpec '{WheelRight}')[0].WheelAxis
+    Assert-Equal 3 (ConvertFrom-KeySpec '{WheelDown 40 10 3}').Count
+}
+
+Test-Case 'click options: button, count, and move-only' {
+    Assert-Equal 'Right' (ConvertFrom-KeySpec '{Click 5 5 Right}')[1].Button
+    Assert-Equal 'Middle' (ConvertFrom-KeySpec '{MButton}')[0].Button
+    Assert-Equal 5 (ConvertFrom-KeySpec '{Click 5 5 2}').Count 'a move plus two press/release pairs'
+    $moveOnly = ConvertFrom-KeySpec '{Click 5 5 0}'
+    Assert-Equal 1 $moveOnly.Count
+    Assert-Equal 'Move' $moveOnly[0].Action
+    Assert-Equal 'Down' (ConvertFrom-KeySpec '{LButton down}')[0].Action
+}
+
+Test-Case 'modifiers reach the mouse too' {
+    Assert-Equal 8 (ConvertFrom-KeySpec '^{Click 5 5}')[1].ControlState 'LEFT_CTRL_PRESSED'
+}
+
+Test-Case 'keys and mouse can be mixed in one specification' {
+    $events = ConvertFrom-KeySpec 'hi{Click 1 2}{Enter}'
+    $types = ($events | ForEach-Object { $_.Type }) -join ''
+    Assert-Equal 'KeyKeyKeyKeyMouseMouseMouseKeyKey' $types
+}
+
 Test-Case 'mistakes are reported, with a way out' {
     Assert-Throws { ConvertFrom-KeySpec '{Enter' } 'unterminated'
     Assert-Throws { ConvertFrom-KeySpec '{Entr}' } "unknown key '\{Entr\}'"
@@ -254,6 +307,135 @@ Import-Module '$(Join-Path $PSScriptRoot 'ConsoleHarness.psd1')'
         Stop-ConsoleApp $session
         Assert-Throws { Get-ConsoleApp -Name 'harness-test' } "no console app named 'harness-test'"
         Assert-Equal $false (Test-Path -LiteralPath $session.RecordPath) 'the record should be gone'
+    }
+
+    # The sink reports what actually arrived, so mouse and resize are asserted directly instead of
+    # through some other app's reaction to them.
+    function Use-Sink([switch] $VirtualTerminalInput, [scriptblock] $Body) {
+        $log = Join-Path ([IO.Path]::GetTempPath()) "console-harness-sink-$([guid]::NewGuid().ToString('N')).log"
+        $sink = Join-Path $PSScriptRoot 'InputSink.ps1'
+        $command = "& '$sink' -LogPath '$log'" + $(if ($VirtualTerminalInput) { ' -VirtualTerminalInput' } else { '' })
+        $session = Start-ConsoleApp -Command $command -WorkingDirectory $PSScriptRoot
+        try {
+            Wait-ConsoleText $session 'INPUT SINK READY' -TimeoutSeconds 30 | Out-Null
+            & $Body $session $log
+        } finally {
+            Stop-ConsoleApp $session
+            Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
+        }
+    }
+
+    Test-Case 'a wheel arrives as a mouse record, with position and delta' {
+        Use-Sink {
+            param($session, $log)
+            Send-ConsoleKeys $session '{WheelDown 2 }' -SettleMilliseconds 100 | Out-Null   # at the centre
+            Send-ConsoleKeys $session '{WheelUp 7 3 1}' -SettleMilliseconds 400 | Out-Null
+            $mouse = @(Get-Content -LiteralPath $log | Where-Object { $_ -match '^MOUSE' })
+            Assert-Equal 3 $mouse.Count 'two notches down, then one up'
+            # 120 per notch, negative down: 0xff88 is -120 in the high word. flags 0x4 = wheeled.
+            Assert-Equal $true ($mouse[0] -match 'buttons=0xff880000 flags=0x4') "got '$($mouse[0])'"
+            Assert-Equal $true ($mouse[2] -match 'pos=7,3 buttons=0x00780000 flags=0x4') "got '$($mouse[2])'"
+        }
+    }
+
+    Test-Case 'a click arrives as a move, a press and a release' {
+        Use-Sink {
+            param($session, $log)
+            Send-ConsoleKeys $session '{Click 12 4 Right}' -SettleMilliseconds 400 | Out-Null
+            $mouse = @(Get-Content -LiteralPath $log | Where-Object { $_ -match '^MOUSE' })
+            Assert-Equal 3 $mouse.Count
+            Assert-Equal $true ($mouse[0] -match 'pos=12,4 buttons=0x00000000 flags=0x1') "move: '$($mouse[0])'"
+            Assert-Equal $true ($mouse[1] -match 'pos=12,4 buttons=0x00000002 flags=0x0') "press: '$($mouse[1])'"
+            Assert-Equal $true ($mouse[2] -match 'pos=12,4 buttons=0x00000000 flags=0x0') "release: '$($mouse[2])'"
+        }
+    }
+
+    Test-Case 'an app in virtual-terminal mode gets SGR sequences instead' {
+        Use-Sink -VirtualTerminalInput {
+            param($session, $log)
+            $state = Get-ConsoleInfo $session
+            Assert-Equal $true $state.VtInput
+            Send-ConsoleKeys $session '{WheelDown 7 3 1}' -SettleMilliseconds 400 | Out-Null
+            $characters = @(Get-Content -LiteralPath $log | Where-Object { $_ -match '^KEY down=1' } | ForEach-Object {
+                if ($_ -match 'char=0x([0-9a-f]+)') { [char] [Convert]::ToInt32($Matches[1], 16) }
+            })
+            # SGR: button 65 is wheel-down, and the coordinates are 1-based.
+            Assert-Equal "$([char] 27)[<65;8;4M" (-join $characters)
+        }
+    }
+
+    Test-Case 'a resize reaches the app, and the state reports the new size' {
+        Use-Sink {
+            param($session, $log)
+            $state = Set-ConsoleSize $session -Width 80 -Height 25 -SettleMilliseconds 400
+            Assert-Equal 80 $state.WindowWidth
+            Assert-Equal 25 $state.WindowHeight
+            Assert-Equal $true ((Get-Content -LiteralPath $log) -match 'RESIZE to 80x' -ne $null) 'the app should see a resize event'
+        }
+    }
+
+    Test-Case 'a full-screen app can be resized too, and reflows' {
+        # fzf holds the alternate screen buffer, where conhost refuses SetConsoleScreenBufferSize
+        # and SetConsoleWindowInfo, so this exercises the window-resize fallback.
+        $session = Start-ConsoleApp -Command $command -WorkingDirectory $PSScriptRoot
+        try {
+            Wait-ConsoleText $session '^\s*>' | Out-Null
+            $state = Set-ConsoleSize $session -Width 80 -Height 20 -SettleMilliseconds 600
+            Assert-Equal 80 $state.WindowWidth
+            Assert-Equal 20 $state.WindowHeight
+            $widest = (@(Get-ConsoleScreen $session) | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+            Assert-Equal $true ($widest -le 80) "the app redrew to $widest columns"
+        } finally { Stop-ConsoleApp $session }
+    }
+
+    Test-Case 'Get-ConsoleInfo reports the console and its input mode' {
+        Use-Sink {
+            param($session, $log)
+            $state = Get-ConsoleInfo $session
+            Assert-Equal 120 $state.WindowWidth
+            Assert-Equal 30 $state.WindowHeight
+            Assert-Equal 1000 $state.BufferHeight 'the default buffer leaves room for scrollback'
+            Assert-Equal $true $state.MouseInput
+            Assert-Equal 'Record' $state.MouseDelivery 'no VT input, so records'
+        }
+    }
+
+    Test-Case 'scrollback can be read and the view moved' {
+        # 200 lines of output, then the app waits, so the buffer holds more than one screen.
+        $session = Start-ConsoleApp -Command '1..200 | ForEach-Object { "line " + $_ }; $null = Read-Host' -WorkingDirectory $PSScriptRoot
+        try {
+            Wait-ConsoleText $session 'line 200' -TimeoutSeconds 30 | Out-Null
+            $state = Get-ConsoleInfo $session
+            Assert-Equal $true ($state.WindowTop -gt 0) 'output should have scrolled the window down the buffer'
+
+            $visible = @(Get-ConsoleScreen $session -NonEmpty)
+            Assert-Equal $false ($visible -contains 'line 1') 'line 1 has scrolled off'
+
+            $all = @(Get-ConsoleScreen $session -Scrollback -NonEmpty)
+            Assert-Equal $true ($all -contains 'line 1') 'but it is still in the buffer'
+            Assert-Equal $true ($all -contains 'line 200') ''
+
+            $rows = @(Get-ConsoleScreen $session -FromRow ($state.WindowTop - 3) -Rows 3)
+            Assert-Equal 3 $rows.Count
+            Assert-Equal $true ($rows[0] -match '^line \d+$') "got '$($rows[0])'"
+
+            $moved = Move-ConsoleView $session -Lines -10
+            Assert-Equal ($state.WindowTop - 10) $moved.WindowTop
+            $moved = Move-ConsoleView $session -Start
+            Assert-Equal 0 $moved.WindowTop
+            Assert-Equal 'line 1' (@(Get-ConsoleScreen $session -NonEmpty)[0])
+            $moved = Move-ConsoleView $session -End
+            Assert-Equal ($state.BufferHeight - $state.WindowHeight) $moved.WindowTop
+        } finally { Stop-ConsoleApp $session }
+    }
+
+    Test-Case 'a command containing double quotes survives' {
+        # Start-Process quoting used to mangle this into a call to Get-Item.
+        $session = Start-ConsoleApp -Command '1..3 | ForEach-Object { "item " + $_ } | fzf' -WorkingDirectory $PSScriptRoot
+        try {
+            Wait-ConsoleText $session 'item 3' | Out-Null
+            Assert-Equal $true ((Get-ConsoleScreen $session -NonEmpty) -match 'item 2' -ne $null)
+        } finally { Stop-ConsoleApp $session }
     }
 
     Test-Case 'Send-ConsoleText does not press keys' {

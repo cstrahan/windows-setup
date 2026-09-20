@@ -36,6 +36,9 @@ function Start-ConsoleApp {
         [string] $WorkingDirectory = $PWD.Path,
         [int] $Width = 120,
         [int] $Height = 30,
+        # Rows kept above the visible window, so Get-ConsoleScreen -Scrollback has something to
+        # read. 'mode con:' can't do this: it sets the buffer height to the window height.
+        [int] $BufferHeight = 1000,
         # Written to this file by the command, for whatever it produces on stdout.
         [string] $OutputPath,
         # A label to find this session by later: Get-ConsoleApp -Name <name>.
@@ -47,10 +50,16 @@ function Start-ConsoleApp {
     if ($Name -and $existing) {
         throw "a console app named '$Name' is already running (pid $($existing.Id)). Stop it first, or pick another name."
     }
-    $prologue = "mode con: cols=$Width lines=$Height | Out-Null; Set-Location -LiteralPath '$($WorkingDirectory -replace "'", "''")'"
+    # Size through the API, not 'mode con:', which sets the buffer height to the window height and
+    # so leaves no scrollback at all. Window first, then buffer: a window may not exceed its buffer.
+    $prologue = "[Console]::SetWindowSize($Width, $Height); [Console]::SetBufferSize($Width, $([Math]::Max($BufferHeight, $Height))); " +
+        "Set-Location -LiteralPath '$($WorkingDirectory -replace "'", "''")'"
     $body = if ($OutputPath) { "$Command | Out-File -LiteralPath '$($OutputPath -replace "'", "''")'" } else { $Command }
+    # -EncodedCommand, because a command containing double quotes does not survive Start-Process's
+    # argument quoting: '... { "item " + $_ }' arrived as a call to Get-Item.
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("$prologue; $body"))
     $process = Start-Process pwsh -PassThru -WindowStyle Hidden -ArgumentList @(
-        '-NoProfile', '-NoLogo', '-Command', "$prologue; $body"
+        '-NoProfile', '-NoLogo', '-EncodedCommand', $encoded
     )
     $session = New-SessionObject -Process $process -Name $Name -Command $Command -WorkingDirectory $WorkingDirectory -OutputPath $OutputPath
     Save-Session -Session $session
@@ -81,7 +90,10 @@ function Get-ConsoleApp {
     )
 
     if (-not (Test-Path -LiteralPath $script:SessionDirectory)) { $sessions = @() } else {
-        $sessions = foreach ($file in Get-ChildItem -LiteralPath $script:SessionDirectory -Filter '*.json') {
+        # Only the session records: the directory also holds <pid>.state.json and screens.
+        $records = Get-ChildItem -LiteralPath $script:SessionDirectory -Filter '*.json' |
+            Where-Object { $_.Name -match '^\d+\.json$' }
+        $sessions = foreach ($file in $records) {
             $record = try { Get-Content -Raw -LiteralPath $file.FullName | ConvertFrom-Json } catch { $null }
             if (-not $record) { [IO.File]::Delete($file.FullName); continue }
             $process = Get-Process -Id $record.Id -ErrorAction SilentlyContinue
@@ -121,6 +133,7 @@ function New-SessionObject {
         OutputPath       = $OutputPath
         StartTime        = $Process.StartTime
         ScreenPath       = [IO.Path]::Combine($script:SessionDirectory, "$($Process.Id).screen.txt")
+        StatePath        = [IO.Path]::Combine($script:SessionDirectory, "$($Process.Id).state.json")
         RecordPath       = [IO.Path]::Combine($script:SessionDirectory, "$($Process.Id).json")
     }
 }
@@ -144,20 +157,125 @@ function Save-Session {
 function Get-ConsoleScreen {
     <#
     .SYNOPSIS
-    Returns the console's visible lines, as the app has drawn them.
+    Returns the console's lines, as the app has drawn them: the visible window by default, or any
+    part of the buffer behind it.
+
+    .EXAMPLE
+    Get-ConsoleScreen $session                      # what's on screen now
+
+    .EXAMPLE
+    Get-ConsoleScreen $session -Scrollback          # the whole buffer, oldest row first
+
+    .EXAMPLE
+    Get-ConsoleScreen $session -FromRow 120 -Rows 10
     #>
-    [CmdletBinding()]
+    [CmdletBinding(DefaultParameterSetName = 'Window')]
     param(
-        [Parameter(Mandatory, ValueFromPipeline)] [PSTypeName('ConsoleHarness.Session')] $Session,
+        [Parameter(Mandatory, Position = 0, ValueFromPipeline)] [PSTypeName('ConsoleHarness.Session')] $Session,
+        # The whole buffer, including what has scrolled off the top of the window.
+        [Parameter(ParameterSetName = 'Scrollback')] [switch] $Scrollback,
+        # A range of buffer rows. Row 0 is the oldest line the buffer still holds.
+        [Parameter(Mandatory, ParameterSetName = 'Range')] [int] $FromRow,
+        [Parameter(ParameterSetName = 'Range')] [int] $Rows = 0,
         # Drop blank lines, which is usually what you want for matching.
         [switch] $NonEmpty
     )
     process {
         if ($Session.Process.HasExited) { throw "the console app (pid $($Session.Id)) has exited" }
-        Invoke-Worker -Session $Session
+        $read = switch ($PSCmdlet.ParameterSetName) {
+            'Scrollback' { @{ mode = 'buffer' } }
+            'Range' { @{ mode = 'range'; row = $FromRow; rows = $Rows } }
+            default { @{ mode = 'window' } }
+        }
+        [void] (Invoke-Worker -Session $Session -Read $read)
         $lines = @(Get-Content -LiteralPath $Session.ScreenPath -ErrorAction SilentlyContinue)
         if ($NonEmpty) { $lines = @($lines | Where-Object { $_.Trim() }) }
         return $lines
+    }
+}
+
+function Get-ConsoleInfo {
+    <#
+    .SYNOPSIS
+    Reports the console's size, where the view sits in the buffer, the cursor, and what kind of
+    input the app is listening for.
+
+    .DESCRIPTION
+    WindowTop is the scroll position: how far down the buffer the visible window starts.
+    VtInput and MouseInput say which mouse delivery the app understands, which is what
+    Send-ConsoleKeys picks between (MouseDelivery reports the choice).
+
+    .EXAMPLE
+    (Get-ConsoleInfo $session).WindowTop
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory, Position = 0, ValueFromPipeline)] [PSTypeName('ConsoleHarness.Session')] $Session)
+    process {
+        if ($Session.Process.HasExited) { throw "the console app (pid $($Session.Id)) has exited" }
+        return Invoke-Worker -Session $Session
+    }
+}
+
+function Set-ConsoleSize {
+    <#
+    .SYNOPSIS
+    Resizes the console, which the app sees as a resize event and redraws for.
+
+    .EXAMPLE
+    Set-ConsoleSize $session -Width 80 -Height 25    # does the app reflow?
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, Position = 0, ValueFromPipeline)] [PSTypeName('ConsoleHarness.Session')] $Session,
+        [int] $Width = 0,
+        [int] $Height = 0,
+        # Rows of scrollback to keep. Defaults to leaving the buffer as it is.
+        [int] $BufferHeight = 0,
+        # How long to let the app redraw before reading the screen back.
+        [int] $SettleMilliseconds = 250
+    )
+    process {
+        if ($Session.Process.HasExited) { throw "the console app (pid $($Session.Id)) has exited" }
+        return Invoke-Worker -Session $Session -SettleMilliseconds $SettleMilliseconds `
+            -Resize @{ width = $Width; height = $Height; bufferHeight = $BufferHeight }
+    }
+}
+
+function Move-ConsoleView {
+    <#
+    .SYNOPSIS
+    Scrolls the visible window through the buffer, as dragging the scrollbar would.
+
+    .DESCRIPTION
+    This moves the view only; the app isn't told and doesn't care. New output from the app scrolls
+    the view back to the bottom, as it does for a person scrolling a terminal.
+
+    .EXAMPLE
+    Move-ConsoleView $session -Lines -20      # back 20 rows
+
+    .EXAMPLE
+    Move-ConsoleView $session -Start          # the oldest rows the buffer holds
+    #>
+    [CmdletBinding(DefaultParameterSetName = 'Lines')]
+    param(
+        [Parameter(Mandatory, Position = 0, ValueFromPipeline)] [PSTypeName('ConsoleHarness.Session')] $Session,
+        # Negative scrolls back, positive forward.
+        [Parameter(Mandatory, ParameterSetName = 'Lines')] [int] $Lines,
+        # An absolute buffer row for the top of the window.
+        [Parameter(Mandatory, ParameterSetName = 'Top')] [int] $Top,
+        # Not -Home: $Home is an automatic variable, and a parameter can't shadow it.
+        [Parameter(Mandatory, ParameterSetName = 'Start')] [switch] $Start,
+        [Parameter(Mandatory, ParameterSetName = 'End')] [switch] $End
+    )
+    process {
+        if ($Session.Process.HasExited) { throw "the console app (pid $($Session.Id)) has exited" }
+        $view = switch ($PSCmdlet.ParameterSetName) {
+            'Lines' { @{ mode = 'lines'; lines = $Lines } }
+            'Top' { @{ mode = 'top'; top = $Top } }
+            'Start' { @{ mode = 'home' } }
+            'End' { @{ mode = 'end' } }
+        }
+        return Invoke-Worker -Session $Session -View $view
     }
 }
 
@@ -182,9 +300,12 @@ function Send-ConsoleKeys {
         [Parameter(Mandatory, Position = 0)] [PSTypeName('ConsoleHarness.Session')] $Session,
         [Parameter(Mandatory, Position = 1)] [AllowEmptyString()] [string[]] $Keys,
         # How long to let the app redraw before reading the screen.
-        [int] $SettleMilliseconds = 250
+        [int] $SettleMilliseconds = 250,
+        # How mouse events are delivered. Auto reads the app's input mode and picks SGR sequences
+        # for a virtual-terminal app, console records otherwise.
+        [ValidateSet('Auto', 'Record', 'Vt')] [string] $MouseDelivery = 'Auto'
     )
-    return Send-KeyEvents -Session $Session -SettleMilliseconds $SettleMilliseconds `
+    return Send-KeyEvents -Session $Session -SettleMilliseconds $SettleMilliseconds -MouseDelivery $MouseDelivery `
         -KeyEvents (ConvertTo-KeyEvents -Specs $Keys)
 }
 
@@ -225,9 +346,14 @@ function ConvertTo-KeyEvents {
 }
 
 function Send-KeyEvents {
-    param($Session, [object[]] $KeyEvents, [int] $SettleMilliseconds)
+    param($Session, [object[]] $KeyEvents, [int] $SettleMilliseconds, [string] $MouseDelivery = 'Auto')
     if ($Session.Process.HasExited) { throw "the console app (pid $($Session.Id)) has exited" }
-    Invoke-Worker -Session $Session -KeyEvents $KeyEvents -SettleMilliseconds $SettleMilliseconds
+    $state = Invoke-Worker -Session $Session -KeyEvents $KeyEvents -SettleMilliseconds $SettleMilliseconds -MouseDelivery $MouseDelivery
+    # An app listening for neither kind of mouse input silently swallows it, which is a confusing
+    # way to spend an afternoon.
+    if (($KeyEvents | Where-Object { $_.Type -eq 'Mouse' }) -and -not $state.VtInput -and -not $state.MouseInput) {
+        Write-Warning "the app (pid $($Session.Id)) has neither virtual-terminal nor mouse input enabled (mode $($state.InputMode)), so it will ignore mouse events."
+    }
     return @(Get-Content -LiteralPath $Session.ScreenPath -ErrorAction SilentlyContinue)
 }
 
@@ -281,7 +407,7 @@ function Stop-ConsoleApp {
         $targets = if ($All) { Get-ConsoleApp } else { @($Session) }
         foreach ($target in $targets) {
             if (-not $target.Process.HasExited) { Stop-ProcessTree -Id $target.Id }
-            foreach ($path in $target.ScreenPath, $target.RecordPath) {
+            foreach ($path in $target.ScreenPath, $target.StatePath, $target.RecordPath) {
                 if ($path -and (Test-Path -LiteralPath $path)) { [IO.File]::Delete($path) }
             }
         }
@@ -298,31 +424,47 @@ function Stop-ProcessTree {
 }
 
 function Invoke-Worker {
+    <#
+    .SYNOPSIS
+    Runs one worker round trip: resize, scroll, send input, wait, read. Returns the console state.
+    #>
     param(
         $Session,
         [object[]] $KeyEvents = @(),
-        [int] $SettleMilliseconds = 250
+        [int] $SettleMilliseconds = 0,
+        [hashtable] $Resize,
+        [hashtable] $View,
+        [hashtable] $Read,
+        [ValidateSet('Auto', 'Record', 'Vt')] [string] $MouseDelivery = 'Auto'
     )
+    $request = @{
+        settleMilliseconds = $SettleMilliseconds
+        mouseDelivery      = $MouseDelivery.ToLowerInvariant()
+        events             = @($KeyEvents)
+    }
+    if ($Resize) { $request['resize'] = $Resize }
+    if ($View) { $request['view'] = $View }
+    if ($Read) { $request['read'] = $Read }
+
+    # The request goes through a file: a command line would need a delimiter, and any delimiter is
+    # a character that then can't be typed (a comma-joined list used to swallow commas in text).
+    $requestPath = [IO.Path]::Combine($script:SessionDirectory, "$($Session.Id).request.json")
+    [void] (New-Item -ItemType Directory -Force -Path $script:SessionDirectory)
+    # -Depth keeps ConvertTo-Json from truncating longer event sequences.
+    [IO.File]::WriteAllText($requestPath, (ConvertTo-Json -InputObject $request -Depth 5 -Compress))
     $arguments = @('-NoProfile', '-NoLogo', '-File', $script:WorkerPath,
         '-TargetPid', $Session.Id, '-ScreenPath', $Session.ScreenPath,
-        '-SettleMilliseconds', $SettleMilliseconds)
-    # The events go through a file: a command line would need a delimiter, and any delimiter is a
-    # character that then can't be typed (a comma-joined list used to swallow commas in text).
-    $eventPath = $null
-    if ($KeyEvents.Count) {
-        $eventPath = [IO.Path]::Combine([IO.Path]::GetTempPath(), "console-harness-keys-$($Session.Id).json")
-        # -Depth keeps ConvertTo-Json from truncating longer key sequences.
-        [IO.File]::WriteAllText($eventPath, (ConvertTo-Json -InputObject $KeyEvents -Depth 3 -Compress))
-        $arguments += @('-KeyEventPath', $eventPath)
-    }
+        '-StatePath', $Session.StatePath, '-RequestPath', $requestPath)
     try {
         $errors = & pwsh @arguments 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "console worker failed (exit code $LASTEXITCODE): $(($errors | ForEach-Object { "$_" }) -join ' ')"
         }
+        return (Get-Content -Raw -LiteralPath $Session.StatePath | ConvertFrom-Json)
     } finally {
-        if ($eventPath -and (Test-Path -LiteralPath $eventPath)) { [IO.File]::Delete($eventPath) }
+        if (Test-Path -LiteralPath $requestPath) { [IO.File]::Delete($requestPath) }
     }
 }
 
-Export-ModuleMember -Function Start-ConsoleApp, Get-ConsoleApp, Get-ConsoleScreen, Send-ConsoleKeys, Send-ConsoleText, Wait-ConsoleText, Stop-ConsoleApp
+Export-ModuleMember -Function Start-ConsoleApp, Get-ConsoleApp, Get-ConsoleScreen, Get-ConsoleInfo,
+    Set-ConsoleSize, Move-ConsoleView, Send-ConsoleKeys, Send-ConsoleText, Wait-ConsoleText, Stop-ConsoleApp

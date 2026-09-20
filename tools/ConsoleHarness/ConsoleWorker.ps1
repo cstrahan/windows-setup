@@ -293,13 +293,11 @@ if ($null -ne $request.view) {
 $mode = 0
 [void] [ConsoleHarness.Native]::GetConsoleMode($inputHandle, [ref] $mode)
 $vtInput = [bool] ($mode -band $ENABLE_VIRTUAL_TERMINAL_INPUT)
-$delivery = switch ($request.mouseDelivery) {
-    'record' { 'Record' }
-    'vt' { 'Vt' }
-    # An app in virtual-terminal input mode never looks at mouse records; one that isn't can only
-    # get them that way.
-    default { if ($vtInput) { 'Vt' } else { 'Record' } }
-}
+# SGR sequences by default: that is what a modern terminal application expects, and it is what
+# the console's own input mode cannot tell us (an app can parse SGR itself without ever setting
+# ENABLE_VIRTUAL_TERMINAL_INPUT, as fzf's light renderer does). Record is for apps that read
+# console input records instead; see the harness README for which is which.
+$delivery = if ($request.mouseDelivery -eq 'record') { 'Record' } else { 'Vt' }
 
 $events = @($request.events)
 if ($events.Count) {

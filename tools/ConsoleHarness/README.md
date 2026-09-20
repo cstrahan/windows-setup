@@ -36,75 +36,78 @@ Several arguments are sent one after another with nothing in between, so
 coordinates are character cells of the visible window, matching the row indices
 `Get-ConsoleScreen` returns; which apps can actually receive them is the next section.
 
-## Mouse: two delivery paths, and which apps take which
+## Mouse: which delivery an application wants
 
-An app can receive mouse input in one of two ways, and they are not interchangeable. Which one
-applies is visible in the console's input mode (`Get-ConsoleInfo`):
+Mouse events go one of two ways, and they are not interchangeable:
 
-| Input mode | How the app gets mouse | Apps seen doing this |
+| `-MouseDelivery` | What is sent | Who wants it |
 |---|---|---|
-| `ENABLE_VIRTUAL_TERMINAL_INPUT` (`0x200`) | SGR escape sequences typed into the input buffer, e.g. `ESC[<65;41;11M` | Neovim (mode `0x208`) |
-| `ENABLE_MOUSE_INPUT` (`0x10`), no VT | `MOUSE_EVENT` records written with `WriteConsoleInput` | fzf (mode `0x98`) |
+| `Vt` (default) | SGR reports typed into the input buffer, e.g. `ESC[<65;41;11M` | anything that parses VT itself: Neovim, fzf in `--height` mode |
+| `Record` | `MOUSE_EVENT` records written with `WriteConsoleInput` | apps that read console input records: anything built on tcell, which includes full-screen fzf |
 
-`Send-ConsoleKeys` reads the mode and picks the path; `-MouseDelivery Record|Vt` overrides it.
+**SGR is the default** because that is what a modern terminal application expects. There is no
+auto-detection: the console's input mode looks like a clue but isn't one, because an application
+can parse SGR sequences from its own input without ever setting `ENABLE_VIRTUAL_TERMINAL_INPUT` —
+fzf's light renderer does exactly that. The harness cannot see what the application wrote outward,
+so it cannot know. When mouse events appear to be ignored, try the other delivery.
 
-This was worked out by experiment, and the details cost enough to be worth writing down:
+### Known application quirks
 
-- **Injected mouse records really are delivered.** A test app that enables mouse input and logs
-  every record it reads (`ReadConsoleInput`) saw ours exactly as sent:
-  `MOUSE pos=7,3 buttons=0xff100000 flags=0x4` for a wheel, press/release pairs for a click. So
-  when an app does nothing, the app is ignoring them — the injection is not at fault.
+Record what you learn here; it is cheaper than rediscovering it.
+
+| Application | Delivery | Notes |
+|---|---|---|
+| Neovim | `Vt` | Routes by position: with a vertical split, a wheel at column 20 scrolls the left window and one at column 90 the right. |
+| fzf, full screen | `Record` | Uses the tcell renderer (`//go:build tcell || windows`), which reads console records. SGR would arrive as a bare `ESC`, which fzf takes as abort and exits. |
+| fzf, `--height` | `Vt` | Uses its light renderer, which enables `?1000h`/`?1006h` itself and parses SGR out of its input buffer (`src/tui/light.go`). Console records are ignored. |
+
+fzf chooses between the two at startup — `terminal.go` picks `NewFullscreenRenderer` when it is
+full screen and `NewLightRenderer` otherwise — so the same program wants different delivery
+depending on one command-line flag. Expect other applications to have their own opinion.
+
+### Aim inside the application's box
+
+Mouse events land at character cells of the visible window, 0-based, matching the row indices
+`Get-ConsoleScreen` returns — not pixels, and there is no `CoordMode`. An application ignores
+events outside the area it drew, which looks exactly like "mouse doesn't work":
+
+```powershell
+# Find out where it actually is, rather than guessing.
+$screen = Get-ConsoleScreen $session
+for ($i = 0; $i -lt $screen.Count; $i++) { '{0,3}: {1}' -f $i, $screen[$i] }
+```
+
+With `--height 60%` in a 30-row console, fzf drew its list in rows 1-14 and its prompt at row 16;
+wheel events aimed at row 20 were below the box and correctly ignored.
+
+### How this was established
+
+- **Injected records really are delivered.** A test app that enables mouse input and logs every
+  record it reads (`InputSink.ps1`) saw ours exactly as sent:
+  `MOUSE pos=7,3 buttons=0xff100000 flags=0x4` for a wheel, press/release pairs for a click. A
+  small tcell program reported the same events as `buttons=512` (tcell's `WheelDown`), which is
+  the library fzf uses — so when an application does nothing, look at the application, the
+  delivery and the coordinates, in that order.
 - **The wheel delta lives in the high word of `dwButtonState`**, 120 per notch, negative for
   scrolling down. Two arithmetic traps in PowerShell: build it in 64-bit, because
   `65176 -shl 16` overflows `Int32` into a negative that won't cast to `uint32`; and a delta that
-  encodes to `0x00000000` is silently ignored by the app rather than rejected.
-- **Neovim ignores mouse records** (it runs with VT input), but acts on SGR sequences, and routes
-  them by position: with a vertical split, a wheel at column 20 scrolled the left window only and
-  one at column 90 the right window only.
-- **fzf takes neither, in a hidden console.** It enables `ENABLE_MOUSE_INPUT`, yet ignored wheel,
-  clicks, double-clicks and move-then-wheel, in the list, in the preview pane and outside its box
-  alike. **Why is still open** — see the correction below. Its keyboard behaviour tests fine.
-- Coordinates here are **character cells relative to the visible window**, 0-based, matching the
-  row indices `Get-ConsoleScreen` returns — not pixels, and there is no `CoordMode` to change.
+  encodes to `0x00000000` is silently ignored by the application rather than rejected.
 
-### Correction: why fzf's mouse works in Windows Terminal (2026-09-19)
+### Aside: why fzf's mouse works in Windows Terminal
 
-An earlier version of this file claimed fzf gets mouse under Windows Terminal "because that's a
-ConPTY with VT input". That was wrong, and the real reason is worth knowing, because it explains
-what would have to change here.
+Windows Terminal does not use this machine's console host. It ships `OpenConsole.exe`
+1.21.2502.04001 and launches that as its pty host — `src/winconpty/winconpty.cpp:45-58` in the
+terminal source returns "the path to either conhost.exe or the side-by-side OpenConsole",
+preferring the bundled one — while this machine's inbox `conhost.exe` is 10.0.19041.1.
 
-**Windows Terminal does not use this machine's console host.** It ships its own and launches that
-as the pty host — `src/winconpty/winconpty.cpp:45-58` in the terminal source returns "the path to
-either conhost.exe or the side-by-side OpenConsole", preferring the bundled one:
-
-| | |
-|---|---|
-| Bundled with Windows Terminal 1.21 | `OpenConsole.exe` 1.21.2502.04001 |
-| This machine's inbox host | `conhost.exe` 10.0.19041.1 |
-
-The modern host has mouse plumbing in both directions, and the old one does not:
-
-- outbound (`src/host/getset.cpp:383`): when a client turns on `ENABLE_MOUSE_INPUT` with quick-edit
-  off, the host sends `ESC[?1003;1006h` to the terminal, asking it to report mouse;
-- inbound (`src/terminal/parser/InputStateMachineEngine.cpp:402`): SGR mouse reports become
-  `INPUT_RECORD` mouse events, with no mouse-mode gate — only a passthrough when the client has
-  virtual-terminal input enabled.
-
-So under Windows Terminal, fzf receives mouse as ordinary console records, synthesised by
-OpenConsole from the SGR reports WT sends it. Measured against the inbox host used by
-`CreatePseudoConsole` on this machine, neither half happens: a client enabling `ENABLE_MOUSE_INPUT`
-produced no `ESC[?1003;1006h`, and injected SGR reports produced no records at all (they arrived
-as literal keystrokes). It is a version gap, not a design limit.
-
-Two consequences:
-
-- A pty harness only helps with fzf's mouse if it hosts the pty with **WT's OpenConsole.exe**, the
-  way `winconpty` does (`--headless --width --height --signal --server`, child attached through
-  `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`). Plain `CreatePseudoConsole` inherits the old host and
-  the old behaviour. See `tools\PtyHarness`.
-- **Why fzf ignores records injected here is still unknown.** Records demonstrably arrive, and
-  under WT fzf acts on records of the same shape, so something about fzf's Windows input path is
-  the missing piece rather than the injection.
+The newer host has mouse plumbing the old one lacks, in both directions: `src/host/getset.cpp:383`
+asks the terminal for mouse (`ESC[?1003;1006h`) when a client turns on `ENABLE_MOUSE_INPUT`, and
+`src/terminal/parser/InputStateMachineEngine.cpp:402` turns SGR reports back into `INPUT_RECORD`
+mouse events. Measured against the inbox host, through a pty, neither half happens: enabling
+`ENABLE_MOUSE_INPUT` produced no request outward, and injected SGR reports produced no records
+(they arrived as literal keystrokes). That matters for `tools\PtyHarness`, which inherits the old
+host from `CreatePseudoConsole`; it does not affect this harness, which injects into the console
+directly.
 
 ## How it works
 

@@ -48,21 +48,24 @@ session is a resident host process (`PtyHost.ps1`) that owns the pty and the emu
 requests on a named pipe; the cmdlets are thin clients. Its parameters travel in a file, because a
 command line with quotes in it does not survive being passed as a process argument.
 
-## Mouse: not yet
+## Mouse: not yet, and not the reason to use this
 
-Mouse events are encoded (SGR reports, from the same `{Click}` / `{WheelDown}` syntax) but do not
-reach applications here, and the reason is a version gap rather than this code:
-`CreatePseudoConsole` binds to the machine's inbox console host, which neither asks the terminal
-for mouse when a client enables `ENABLE_MOUSE_INPUT` nor turns SGR reports back into mouse records.
-Windows Terminal doesn't use that host — it ships `OpenConsole.exe` and launches it as the pty
-host, which does both. The correction in
-[ConsoleHarness's README](../ConsoleHarness/README.md#correction-why-fzfs-mouse-works-in-windows-terminal-2026-09-19)
-has the measurements and the source references.
+Mouse events are encoded here (SGR reports, from the same `{Click}` / `{WheelDown}` syntax) but do
+not reach applications, because `CreatePseudoConsole` binds to this machine's **inbox** console
+host, which neither asks the terminal for mouse when a client enables `ENABLE_MOUSE_INPUT` nor
+turns SGR reports back into mouse records. Windows Terminal doesn't use that host — it ships
+`OpenConsole.exe` and launches it as its pty host, and that one does both. The measurements and
+source references are in
+[ConsoleHarness's README](../ConsoleHarness/README.md#aside-why-fzfs-mouse-works-in-windows-terminal).
 
-Making mouse work here means hosting the pty the way `winconpty` does: create the
-`\Device\ConDrv\Server` handle and its `\Reference` child, spawn WT's `OpenConsole.exe --headless
---width --height --signal --server`, and attach the child through
-`PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`. Not done yet.
+Fixing it means hosting the pty the way `winconpty` does: create the `\Device\ConDrv\Server`
+handle and its `\Reference` child, spawn WT's `OpenConsole.exe --headless --width --height
+--signal --server`, and attach the child through `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`. Not done.
+
+Note what this is *not* worth doing for: **ConsoleHarness already drives mouse in both fzf
+renderers and in Neovim**, by injecting into the console directly. This harness would only add the
+cases where a pty is the point — an application that insists on a real terminal, or behaviour that
+depends on genuine VT semantics rather than conhost's rendering of them.
 
 ## Known gaps
 

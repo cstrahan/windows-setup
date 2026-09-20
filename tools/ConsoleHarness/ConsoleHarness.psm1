@@ -203,8 +203,8 @@ function Get-ConsoleInfo {
 
     .DESCRIPTION
     WindowTop is the scroll position: how far down the buffer the visible window starts.
-    VtInput and MouseInput say which mouse delivery the app understands, which is what
-    Send-ConsoleKeys picks between (MouseDelivery reports the choice).
+    VtInput and MouseInput describe how the console is configured, which is a hint about mouse
+    delivery but not an answer: an app can parse SGR sequences itself without setting either.
 
     .EXAMPLE
     (Get-ConsoleInfo $session).WindowTop
@@ -302,9 +302,9 @@ function Send-ConsoleKeys {
         [Parameter(Mandatory, Position = 1)] [AllowEmptyString()] [string[]] $Keys,
         # How long to let the app redraw before reading the screen.
         [int] $SettleMilliseconds = 250,
-        # How mouse events are delivered. Auto reads the app's input mode and picks SGR sequences
-        # for a virtual-terminal app, console records otherwise.
-        [ValidateSet('Auto', 'Record', 'Vt')] [string] $MouseDelivery = 'Auto'
+        # How mouse events are delivered: SGR escape sequences (what most terminal applications
+        # expect) or console input records. The README lists the apps that want Record.
+        [ValidateSet('Vt', 'Record')] [string] $MouseDelivery = 'Vt'
     )
     return Send-KeyEvents -Session $Session -SettleMilliseconds $SettleMilliseconds -MouseDelivery $MouseDelivery `
         -KeyEvents (ConvertTo-KeyEvents -Specs $Keys)
@@ -347,14 +347,9 @@ function ConvertTo-KeyEvents {
 }
 
 function Send-KeyEvents {
-    param($Session, [object[]] $KeyEvents, [int] $SettleMilliseconds, [string] $MouseDelivery = 'Auto')
+    param($Session, [object[]] $KeyEvents, [int] $SettleMilliseconds, [string] $MouseDelivery = 'Vt')
     if ($Session.Process.HasExited) { throw "the console app (pid $($Session.Id)) has exited" }
-    $state = Invoke-Worker -Session $Session -KeyEvents $KeyEvents -SettleMilliseconds $SettleMilliseconds -MouseDelivery $MouseDelivery
-    # An app listening for neither kind of mouse input silently swallows it, which is a confusing
-    # way to spend an afternoon.
-    if (($KeyEvents | Where-Object { $_.Type -eq 'Mouse' }) -and -not $state.VtInput -and -not $state.MouseInput) {
-        Write-Warning "the app (pid $($Session.Id)) has neither virtual-terminal nor mouse input enabled (mode $($state.InputMode)), so it will ignore mouse events."
-    }
+    [void] (Invoke-Worker -Session $Session -KeyEvents $KeyEvents -SettleMilliseconds $SettleMilliseconds -MouseDelivery $MouseDelivery)
     return @(Get-Content -LiteralPath $Session.ScreenPath -ErrorAction SilentlyContinue)
 }
 
@@ -436,7 +431,7 @@ function Invoke-Worker {
         [hashtable] $Resize,
         [hashtable] $View,
         [hashtable] $Read,
-        [ValidateSet('Auto', 'Record', 'Vt')] [string] $MouseDelivery = 'Auto'
+        [ValidateSet('Vt', 'Record')] [string] $MouseDelivery = 'Vt'
     )
     $request = @{
         settleMilliseconds = $SettleMilliseconds

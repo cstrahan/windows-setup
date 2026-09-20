@@ -135,8 +135,8 @@ Import-Module '$(Join-Path $PSScriptRoot 'ConsoleHarness.psd1')'
     Test-Case 'a wheel arrives as a mouse record, with position and delta' {
         Use-Sink {
             param($session, $log)
-            Send-ConsoleKeys $session '{WheelDown 2 }' -SettleMilliseconds 100 | Out-Null   # at the centre
-            Send-ConsoleKeys $session '{WheelUp 7 3 1}' -SettleMilliseconds 400 | Out-Null
+            Send-ConsoleKeys $session '{WheelDown 2 }' -MouseDelivery Record -SettleMilliseconds 100 | Out-Null   # at the centre
+            Send-ConsoleKeys $session '{WheelUp 7 3 1}' -MouseDelivery Record -SettleMilliseconds 400 | Out-Null
             $mouse = @(Get-Content -LiteralPath $log | Where-Object { $_ -match '^MOUSE' })
             Assert-Equal 3 $mouse.Count 'two notches down, then one up'
             # 120 per notch, negative down: 0xff88 is -120 in the high word. flags 0x4 = wheeled.
@@ -148,7 +148,7 @@ Import-Module '$(Join-Path $PSScriptRoot 'ConsoleHarness.psd1')'
     Test-Case 'a click arrives as a move, a press and a release' {
         Use-Sink {
             param($session, $log)
-            Send-ConsoleKeys $session '{Click 12 4 Right}' -SettleMilliseconds 400 | Out-Null
+            Send-ConsoleKeys $session '{Click 12 4 Right}' -MouseDelivery Record -SettleMilliseconds 400 | Out-Null
             $mouse = @(Get-Content -LiteralPath $log | Where-Object { $_ -match '^MOUSE' })
             Assert-Equal 3 $mouse.Count
             Assert-Equal $true ($mouse[0] -match 'pos=12,4 buttons=0x00000000 flags=0x1') "move: '$($mouse[0])'"
@@ -203,7 +203,10 @@ Import-Module '$(Join-Path $PSScriptRoot 'ConsoleHarness.psd1')'
             Assert-Equal 30 $state.WindowHeight
             Assert-Equal 1000 $state.BufferHeight 'the default buffer leaves room for scrollback'
             Assert-Equal $true $state.MouseInput
-            Assert-Equal 'Record' $state.MouseDelivery 'no VT input, so records'
+            Assert-Equal $false $state.VtInput
+            # The reported delivery is what was asked for, not a guess about the app: there is no
+            # auto-detection, because an app can parse SGR without setting the VT input flag.
+            Assert-Equal 'Vt' $state.MouseDelivery 'SGR is the default'
         }
     }
 
@@ -243,6 +246,60 @@ Import-Module '$(Join-Path $PSScriptRoot 'ConsoleHarness.psd1')'
             Wait-ConsoleText $session 'item 3' | Out-Null
             Assert-Equal $true ((Get-ConsoleScreen $session -NonEmpty) -match 'item 2' -ne $null)
         } finally { Stop-ConsoleApp $session }
+    }
+
+    # Mouse, against the application each delivery is for. Both use fzf's preview to read the
+    # selection back, because the selection bar itself shows on every row of the character grid.
+    function Use-FzfWithPreview([string] $Extra, [scriptblock] $Body) {
+        $items = "1..40 | ForEach-Object { 'item ' + `$_ }"
+        $session = Start-ConsoleApp -Command "$items | fzf $Extra --preview 'echo SEL={}'" `
+            -WorkingDirectory $PSScriptRoot -Width 100 -Height 24
+        try {
+            Wait-ConsoleText $session 'SEL=' -TimeoutSeconds 30 | Out-Null
+            & $Body $session
+        } finally { Stop-ConsoleApp $session }
+    }
+
+    function Get-Selection($Session) {
+        $line = Get-ConsoleScreen $Session | Where-Object { $_ -match 'SEL=' } | Select-Object -First 1
+        if ($line -match 'SEL="(.+?)"') { return $Matches[1] }
+        return ''
+    }
+
+    Test-Case 'full-screen fzf takes mouse as console records (tcell)' {
+        Use-FzfWithPreview '' {
+            param($session)
+            Assert-Equal 'item 1' (Get-Selection $session)
+            Send-ConsoleKeys $session '{WheelUp 5 10 5}' -MouseDelivery Record -SettleMilliseconds 800 | Out-Null
+            Assert-Equal 'item 6' (Get-Selection $session) 'five notches up the list'
+        }
+    }
+
+    Test-Case 'a click selects the row it lands on' {
+        Use-FzfWithPreview '' {
+            param($session)
+            # Aim at where the application actually drew, rather than at a guess.
+            $screen = Get-ConsoleScreen $session
+            $row = -1
+            for ($index = 0; $index -lt $screen.Count; $index++) {
+                if ($screen[$index] -match 'item 14') { $row = $index; break }
+            }
+            Assert-Equal $true ($row -ge 0) 'item 14 should be on screen'
+            Send-ConsoleKeys $session "{Click 4 $row}" -MouseDelivery Record -SettleMilliseconds 800 | Out-Null
+            Assert-Equal 'item 14' (Get-Selection $session)
+        }
+    }
+
+    Test-Case 'fzf --height takes mouse as SGR instead (light renderer)' {
+        Use-FzfWithPreview '--height 60%' {
+            param($session)
+            Assert-Equal 'item 1' (Get-Selection $session)
+            # Record delivery is what this renderer ignores; Vt is what it reads.
+            Send-ConsoleKeys $session '{WheelUp 5 10 4}' -MouseDelivery Record -SettleMilliseconds 600 | Out-Null
+            Assert-Equal 'item 1' (Get-Selection $session) 'console records are ignored here'
+            Send-ConsoleKeys $session '{WheelUp 5 10 4}' -SettleMilliseconds 600 | Out-Null
+            Assert-Equal 'item 5' (Get-Selection $session) 'the default (Vt) delivery works'
+        }
     }
 
     Test-Case 'Send-ConsoleText does not press keys' {

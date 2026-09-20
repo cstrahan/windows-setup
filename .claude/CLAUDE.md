@@ -370,16 +370,26 @@ try {
   `Stop-ConsoleApp -All` clears everything the module started, which is the cleanup to run after
   a script died before its `finally`.
 - **Mouse, size and scrollback** (all verified 2026-09-19): `{Click 40 10}`, `{Click 5 5 Right}`,
-  `{LButton down}`…`{LButton up}`, `{WheelDown 3}` (coordinates are cells in the visible window and
-  stick between tokens); `Get-ConsoleInfo`, `Set-ConsoleSize`; `Get-ConsoleScreen -Scrollback` /
-  `-FromRow`/`-Rows` and `Move-ConsoleView -Lines/-Top/-Start/-End`. The hard-won details are in
-  the README, but in short: **an app gets mouse either as console records or as SGR escape
-  sequences, never both**, depending on whether it has `ENABLE_VIRTUAL_TERMINAL_INPUT` (Neovim) or
-  `ENABLE_MOUSE_INPUT` (fzf); the harness reads the mode and picks. **fzf's mouse can't be tested
-  here at all** — it only handles mouse under Windows Terminal's ConPTY, not a legacy console —
-  so don't spend time on it. An app on the **alternate screen buffer** (any full-screen TUI)
-  refuses buffer/window resizes with `ERROR_INVALID_HANDLE`, so `Set-ConsoleSize` falls back to
-  resizing conhost's window; it also has no scrollback.
+  `{LButton down}`...`{LButton up}`, `{WheelDown 3}` (coordinates are cells in the visible window
+  and stick between tokens); `Get-ConsoleInfo`, `Set-ConsoleSize`; `Get-ConsoleScreen -Scrollback`
+  / `-FromRow`/`-Rows` and `Move-ConsoleView -Lines/-Top/-Start/-End`.
+- **Mouse delivery is a property of the application, not the console.** `-MouseDelivery Vt`
+  (the default, SGR reports) or `Record` (console input records). There is deliberately no
+  auto-detection: an application can parse SGR from its own input without setting
+  `ENABLE_VIRTUAL_TERMINAL_INPUT`, so the console's mode proves nothing. Neovim and fzf's
+  `--height` mode want `Vt`; full-screen fzf wants `Record` (it uses tcell). The README keeps a
+  table of known application quirks - **add to it** when you work one out.
+- **Before aiming a mouse event, print the screen with row numbers** and see where the
+  application actually drew. Events outside its box are ignored, which looks identical to "mouse
+  is broken", and guessing at coordinates cost a long detour once already: fzf with `--height 60%`
+  drew rows 1-14 in a 30-row console while the wheel was being aimed at row 20. One
+  `for ($i = 0; $i -lt $screen.Count; $i++) { '{0,3}: {1}' -f $i, $screen[$i] }` settles it, and
+  a small window keeps the dump cheap. The same goes for reading state back: assert on something
+  that can actually change (fzf's `--preview 'echo SEL={}'`), not on a marker like the selection
+  bar, which the character grid shows on every row.
+- **An app on the alternate screen buffer** (any full-screen TUI) refuses buffer/window resizes
+  with `ERROR_INVALID_HANDLE`, so `Set-ConsoleSize` falls back to resizing conhost's window; it
+  also has no scrollback.
 - **Tests:** `pwsh -File tools\Test-Tools.ps1` runs every `tools\<module>\Test-*.ps1`
   (`-Name KeySpec` for one, `-SkipConsole` to skip the ones that drive a real console). The
   console tests need fzf on PATH — it isn't in Claude's shells, so prepend

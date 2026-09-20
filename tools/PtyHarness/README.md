@@ -28,11 +28,13 @@ which is how you find out what it actually asked the terminal for.
 | How the screen is read | conhost renders it; we read the character grid | we render the VT stream ourselves |
 | Dependencies | none (Win32 only) | wasmtime + a vendored wasm, ~22 MB |
 | Works before the machine is set up | yes | no |
-| Mouse | injects `INPUT_RECORD`s directly | see below |
+| Mouse | injects `INPUT_RECORD`s or types SGR, per application | SGR only; the console host adapts |
 | Fidelity | conhost's, including its quirks | a real terminal's: reflow, scrollback, styles |
 
-ConsoleHarness remains the default. Reach for this one when the thing under test depends on
-genuine terminal behaviour rather than on conhost's rendering of it.
+ConsoleHarness remains the default: fewer moving parts, and it works on a machine that hasn't
+been set up. Reach for this one when the thing under test depends on genuine terminal behaviour —
+reflow, scrollback, VT semantics — rather than on conhost's rendering of it, or when you would
+rather not care which mouse delivery an application wants.
 
 ## Two constraints that shaped this
 
@@ -48,35 +50,53 @@ session is a resident host process (`PtyHost.ps1`) that owns the pty and the emu
 requests on a named pipe; the cmdlets are thin clients. Its parameters travel in a file, because a
 command line with quotes in it does not survive being passed as a process argument.
 
-## Mouse: not yet, and not the reason to use this
+## Mouse, and the console host
 
-Mouse events are encoded here (SGR reports, from the same `{Click}` / `{WheelDown}` syntax) but do
-not reach applications, because `CreatePseudoConsole` binds to this machine's **inbox** console
-host, which neither asks the terminal for mouse when a client enables `ENABLE_MOUSE_INPUT` nor
-turns SGR reports back into mouse records. Windows Terminal doesn't use that host — it ships
-`OpenConsole.exe` and launches it as its pty host, and that one does both. The measurements and
-source references are in
-[ConsoleHarness's README](../ConsoleHarness/README.md#aside-why-fzfs-mouse-works-in-windows-terminal).
+Mouse works, in both of fzf's renderers and in Neovim, with one delivery: SGR reports. The console
+host adapts — it turns them into `INPUT_RECORD`s for an application that reads console input, and
+passes them through for one that parses VT itself — which is a terminal's job, and why nothing
+here needs to know which kind an application is.
 
-Fixing it means hosting the pty the way `winconpty` does: create the `\Device\ConDrv\Server`
-handle and its `\Reference` child, spawn WT's `OpenConsole.exe --headless --width --height
---signal --server`, and attach the child through `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`. Not done.
+That only holds with **Windows Terminal's console host**. `CreatePseudoConsole` binds to the
+machine's inbox conhost (10.0.19041.1 here), which forwards no mouse in either direction: a client
+enabling `ENABLE_MOUSE_INPUT` produced no request outward and injected reports produced no records.
+Windows Terminal doesn't use it either; it ships `OpenConsole.exe` (1.21.2502.04001) and launches
+that as its pty host, which has the plumbing — `src/host/getset.cpp:383` asks the terminal for
+mouse, `src/terminal/parser/InputStateMachineEngine.cpp:402` converts the reports back.
 
-Note what this is *not* worth doing for: **ConsoleHarness already drives mouse in both fzf
-renderers and in Neovim**, by injecting into the console directly. This harness would only add the
-cases where a pty is the point — an application that insists on a real terminal, or behaviour that
-depends on genuine VT semantics rather than conhost's rendering of them.
+So `Start-PtyProcess` hosts the pty itself rather than calling `CreatePseudoConsole`, following
+`winconpty`: open `\Device\ConDrv\Server` and its `\Reference` child through `NtOpenFile`, spawn
+`OpenConsole.exe --headless --width --height --signal --server` with exactly four handles
+inherited, then start the application with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`. Resizes go down
+the signal pipe as a packet, since `ResizePseudoConsole` only knows about consoles kernel32 made.
+
+Two things that cost time, in case they come up again:
+
+- **That attribute takes an `HPCON`, not a handle.** An `HPCON` points at a
+  `{ hSignal, hPtyReference, hConPtyProcess }` struct, which the OS dereferences; passing the
+  reference handle directly makes it read a bogus pointer and **crashes the calling process**
+  (0xC0000005 inside `CreateProcessW`) rather than failing.
+- **OpenConsole cannot be run from where Windows Terminal keeps it.** Executing anything inside
+  `C:\Program Files\WindowsApps` from outside the package fails with "Access is denied", so
+  `Get-OpenConsolePath` copies it next to the harness (`lib\OpenConsole.exe`, gitignored) and
+  refreshes the copy when Terminal's version changes. `$env:PTYHARNESS_CONSOLE_HOST` overrides,
+  and `Start-PtyProcess -ConsoleHost Inbox` uses `CreatePseudoConsole` instead.
 
 ## Known gaps
 
-- `Get-PtyScreen` returns the formatter's whole active screen, which includes scrollback: a
-  20-row terminal can come back with 55 rows. The viewport and the history need separating, and
-  scrollback deserves its own parameter as in ConsoleHarness.
-- **Terminal queries go unanswered.** libghostty-vt reports things like device attributes and
-  size through `GHOSTTY_TERMINAL_OPT_WRITE_PTY`, which isn't wired to the pty's input yet, so an
-  application that asks a question gets no reply — Neovim's `XTGETTCAP` request ended up drawn on
-  the screen as text. This should be connected before the harness is trusted for real work.
-- No tests of its own yet.
+- **`Get-PtyScreen` returns the scrollback as well as the viewport**: 20 lines of output in a
+  10-row terminal comes back as 20 lines, oldest first. libghostty's formatter formats the whole
+  screen, and blank rows are not padded, so the viewport can't be recovered by taking the last N
+  lines. The fix is to pass the formatter a selection covering the viewport, built from
+  `GHOSTTY_POINT_TAG_VIEWPORT` points through `ghostty_terminal_grid_ref`; the struct layouts come
+  from `ghostty_type_json()`.
+- **Terminal queries go unanswered.** An application that asks the terminal something gets no
+  reply — Neovim's `XTGETTCAP` request ended up drawn on the screen as text. Replies come from
+  `GHOSTTY_TERMINAL_OPT_WRITE_PTY`, which takes a **function pointer**, and the wasm module has no
+  imports, so a host function cannot simply be handed to it. It is still possible: the module
+  exports `__indirect_function_table`, and wasmtime can put a host function in a table slot, whose
+  index is then the function pointer. Worth doing before this harness is trusted for real work.
+- Colours and styles are discarded: the screen comes back as text.
 
 ## Pieces
 
@@ -84,7 +104,20 @@ depends on genuine VT semantics rather than conhost's rendering of them.
 |---|---|
 | `PtyHarness.psm1` | the cmdlets, and the encoder from key events to terminal bytes |
 | `PtyHost.ps1` | the resident host: pty, emulator, named-pipe server |
-| `PtyNative.ps1` | ConPTY interop (`CreatePseudoConsole`, pipes, process attributes) |
+| `PtyNative.ps1` | picks the console host, and wraps the interop |
+| `PtyNative.cs` | ConPTY through `CreatePseudoConsole` (the inbox host) |
+| `PtyNativeOpenConsole.cs` | a pty hosted by Windows Terminal's OpenConsole, winconpty's way |
 | `Ghostty.ps1` | libghostty-vt in wasmtime: write bytes, read the screen, resize |
 | `vendor/` | the emulator itself, and where it came from |
 | `lib/` | wasmtime, fetched by the `pty-harness` workload (gitignored) |
+
+## Tests
+
+```powershell
+pwsh -File .	ools\PtyHarness\Test-PtyHarness.ps1
+```
+
+They run real programs (cmd.exe, fzf) under a pseudo console: keyboard, resize that the program
+notices, session pickup from another process, cleanup, and mouse in both fzf renderers. The mouse
+ones are skipped when fzf isn't on PATH, and everything is skipped when the workload hasn't
+fetched wasmtime.

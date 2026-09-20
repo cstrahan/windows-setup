@@ -47,7 +47,7 @@ try {
     Write-Log "starting: $CommandLine ($Columns x $Rows)"
     $terminal = New-GhosttyTerminal -Columns $Columns -Rows $Rows
     $pty = Start-PtyProcess -CommandLine $CommandLine -WorkingDirectory $WorkingDirectory -Columns $Columns -Rows $Rows
-    Write-Log "child pid $($pty.ProcessId)"
+    Write-Log "child pid $($pty.ProcessId), console host $($pty.ConsoleHost)"
 
     $pipe = [IO.Pipes.NamedPipeServerStream]::new(
         $PipeName, [IO.Pipes.PipeDirection]::InOut, 1,
@@ -115,7 +115,9 @@ try {
                         $response['columns'] = $terminal.Columns
                         $response['rows'] = $terminal.Rows
                         $response['processId'] = $pty.ProcessId
-                        $response['exited'] = $exited -or [PtyHarness.Native]::HasExited($pty)
+                        $response['consoleHost'] = "$($pty.ConsoleHost)"
+
+                        $response['exited'] = $exited -or (Test-PtyProcessExited $pty)
                     }
                     $writer.WriteLine(($response | ConvertTo-Json -Depth 5 -Compress))
                 }

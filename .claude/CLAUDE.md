@@ -520,28 +520,15 @@ The earlier `nvim-data` (only shada/swap from Neovim 0.10) is at `nvim-data.bak`
 - **Not re-checked since KB5066791:** WSL/WSLg on this machine. Routine runs still use `-SkipWsl`.
 - **Left for the user to delete:** `C:\Ruby32-x64\msys64` (865 MB), orphaned by the Ruby 3.2
   uninstall.
-- **A ConPTY harness is planned**, to lift the limits of the attach-based one (fzf's mouse, real
-  reflow, true scrollback). Design agreed 2026-09-19, step 1 (the shared `tools\KeySpec` module)
-  done. Remaining: a workload that fetches the pinned wasm and restores Wasmtime; the pty host;
-  the client cmdlets. **Spike results, all verified on this machine:**
-  - `ghostty-vt.wasm` / `ghostty-vt-small.wasm` (1.0 MB / 747 KB) are published **only on the
-    rolling `tip` prerelease** of ghostty-org/ghostty (rebuilt per commit; tagged releases carry
-    no wasm), so pin by SHA-256 as the driver packages do. The C API is explicitly unstable.
-  - The module has **zero imports** — no WASI, no JS glue — so any runtime can instantiate it. It
-    needs `simd128`, which wasmtime enables by default.
-  - `Wasmtime` 48.0.2 from NuGet (net8.0 + netstandard2.0, bundled native binaries) loaded it and
-    ran `ghostty_terminal_new` → `ghostty_terminal_vt_write` → `ghostty_formatter_format_alloc`,
-    returning correctly emulated screen text (cursor addressing, erase-line, SGR). Calls are flat
-    `i32` signatures; structs are passed as pointers into wasm memory.
-  - **`ghostty_type_json()`** returns a 43 KB description of every struct's size, alignment and
-    field offsets — use it to lay structs out rather than guessing (`GhosttyFormatterTerminalOptions`
-    is 40 bytes, not the 20 a naive reading of the header suggests).
-  - `ghostty_key_encoder_encode` / `ghostty_mouse_encoder_encode` also *produce* input bytes, so
-    the pty side can hand KeySpec events to ghostty instead of hand-rolling SGR.
-  - **ConPTY owns its byte stream**, unlike conhost: a session will need a resident host process
-    (pty + emulator + named pipe) rather than the stateless worker used today.
-  - Zig isn't needed for this (the prebuilt wasm works), but a zig/WASM workload would let us
-    build libghostty-vt from a tagged source tarball instead of a nightly asset.
+- **`tools\PtyHarness` runs programs under a pseudo console** and renders the VT stream with
+  libghostty-vt in wasmtime, for when genuine terminal behaviour matters (reflow, scrollback, VT
+  semantics) rather than conhost's rendering of it. Mouse there needs no per-application choice:
+  send SGR and the console host adapts. **It hosts the pty with Windows Terminal's OpenConsole**,
+  not `CreatePseudoConsole`, because the inbox conhost on this machine forwards no mouse at all;
+  the host binary is copied to `tools\PtyHarness\lib` since Windows refuses to execute anything
+  inside `WindowsApps` from outside the package. Remaining gaps are in its README: the screen read
+  includes scrollback, and terminal queries go unanswered (the fix is a host function in the
+  module's `__indirect_function_table`, since the wasm has no imports to hang a callback on).
 - **`tools\ConsoleHarness` now makes TUI behaviour testable** (fzf, Neovim), so verify interactive
   changes yourself instead of asking the user to try them.
 

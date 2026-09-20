@@ -15,7 +15,7 @@
         # Windows
         'ssh', 'time', 'system', 'remote-desktop', 'explorer', 'taskbar', 'keyboard'
         # Tools
-        'terminal', 'vscode', 'git', 'go', 'uv', 'shell', 'neovim'
+        'terminal', 'vscode', 'git', 'go', 'uv', 'shell', 'neovim', 'pty-harness'
         # Development stacks (mostly from microsoft/WindowsDeveloperConfig's src/Workloads)
         'dotnet', 'java', 'python', 'node', 'typescript', 'ruby', 'rust', 'powershell', 'winforms', 'winui'
     )
@@ -49,6 +49,8 @@
                               Description = 'uv, the Python package and project manager' }
         shell            = @{ Requires = @(); Commands = @('fzf', 'fd', 'rg', 'bat', 'eza')
                               Description = 'Interactive PowerShell: profile.d loader, PSFzf (Ctrl+T/Ctrl+R), fzf/fd/rg/bat/eza via mise' }
+        'pty-harness'    = @{ Requires = @(); Commands = @()
+                              Description = "WebAssembly engine for the pty test harness (tools\PtyHarness)" }
         neovim           = @{ Requires = @('git', 'uv', 'node', 'ruby'); Commands = @('nvim', 'fzf', 'rg', 'fd', 'lazygit', 'tree-sitter', 'ast-grep', 'gcc')
                               Description = 'Prerequisites for LazyVim: CLI tools via mise, gcc, Nerd Font in Terminal, providers (python venv, npm, gem), lazy hererocks' }
         visualstudio     = @{ Requires = @(); Commands = @()

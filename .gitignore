@@ -5,3 +5,6 @@ logs/
 # which downloaded PowerShell Gallery modules here.)
 dsc/*
 !dsc/WindowsSetup.*/
+
+# The pty harness fetches its WebAssembly engine here; the emulator itself is vendored.
+tools/PtyHarness/lib/

@@ -1,0 +1,33 @@
+# Runtime for the pty test harness (tools\PtyHarness): a WebAssembly engine to run libghostty-vt.
+#
+# The terminal emulator itself is vendored (tools\PtyHarness\vendor), because Ghostty publishes
+# wasm only on a rolling nightly; see that folder's README. What can't be vendored is wasmtime's
+# native engine at 21 MB, so it comes from the NuGet package, whose URL is immutable and whose
+# hash is pinned here. Two files are taken out of the one package: the managed binding and the
+# engine it calls.
+#
+# All of this lands in the repository (gitignored) and needs no elevation.
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+parameters:
+  # configure.ps1 passes the repo's path.
+  repoRoot:
+    type: string
+resources:
+  - name: wasmtimeManaged
+    type: WindowsSetup.WebFile/WebFile
+    properties:
+      Uri: https://api.nuget.org/v3-flatcontainer/wasmtime/48.0.2/wasmtime.48.0.2.nupkg
+      Sha256: 7672C89E28338DE4F838951E5CDDFAB0EB68CFA86031CB4520390BC71F770951
+      ArchiveMember: lib/net8.0/Wasmtime.Dotnet.dll
+      Destination: "[concat(parameters('repoRoot'), '\\tools\\PtyHarness\\lib\\Wasmtime.Dotnet.dll')]"
+
+  - name: wasmtimeNative
+    type: WindowsSetup.WebFile/WebFile
+    properties:
+      Uri: https://api.nuget.org/v3-flatcontainer/wasmtime/48.0.2/wasmtime.48.0.2.nupkg
+      Sha256: 7672C89E28338DE4F838951E5CDDFAB0EB68CFA86031CB4520390BC71F770951
+      ArchiveMember: runtimes/win-x64/native/wasmtime.dll
+      Destination: "[concat(parameters('repoRoot'), '\\tools\\PtyHarness\\lib\\wasmtime.dll')]"
+    dependsOn:
+      # One download, two members: let the first one populate the cache.
+      - "[resourceId('WindowsSetup.WebFile/WebFile', 'wasmtimeManaged')]"
